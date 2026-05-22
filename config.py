@@ -23,5 +23,10 @@ class Settings(BaseSettings):
     cookie_path: str = "data/browser_profiles"
     db_path: str = "data/cache.db"
 
+    # Chrome profile to read cookies from during manual login
+    # Run `chrome://version` in Chrome to see your profile path.
+    # Use the folder name only, e.g. "Default", "Profile 1", "Profile 2".
+    chrome_profile: str = "Default"
+
 
 settings = Settings()

@@ -125,7 +125,8 @@ def fetch(
 
     with sync_playwright() as pw:
         context, _ = ensure_logged_in(
-            pw, profile_dir, settings.fb_email, settings.fb_password, headless=headless
+            pw, profile_dir, settings.fb_email, settings.fb_password,
+            headless=headless, chrome_profile=settings.chrome_profile,
         )
         try:
             for url in urls:
