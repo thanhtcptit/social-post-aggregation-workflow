@@ -1,0 +1,34 @@
+# Environment & secrets
+.env
+*.env
+
+# Data directory (cookies, SQLite cache)
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# IDE
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# Playwright
+playwright-report/
+test-results/

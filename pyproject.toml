@@ -1,0 +1,19 @@
+[project]
+name = "facebook-post-aggregation-agent"
+version = "0.1.0"
+description = "Aggregate & query Vietnamese Facebook badminton group posts"
+requires-python = ">=3.11"
+dependencies = [
+    "playwright>=1.44.0",
+    "openai>=1.30.0",
+    "typer>=0.12.0",
+    "pydantic-settings>=2.2.0",
+    "python-dotenv>=1.0.0",
+    "rich>=13.7.0",
+]
+
+[project.scripts]
+badminton-agent = "main:app"
+
+[tool.uv]
+package = false
