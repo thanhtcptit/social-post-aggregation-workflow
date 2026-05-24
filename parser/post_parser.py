@@ -22,6 +22,8 @@ null nếu mơ hồ
 - shuttlecock        (string hoặc null) — loại cầu: "95%" cho cầu qua sử dụng, \
 "new" cho cầu mới; null nếu không đề cập
 - notes              (string hoặc null) — thông tin bổ sung quan trọng khác
+- is_full            (boolean) — true nếu bài đã thông báo đủ người (đã đủ, full người, \
+đủ r, đủ slot, hết chỗ, v.v.), false nếu vẫn đang tìm người
 
 Quy tắc:
 - Nếu không phải bài tìm người đánh cầu, đặt is_badminton_post=false và các trường còn lại là null.
@@ -49,6 +51,8 @@ Mỗi phần tử có các trường:
 - level              (string hoặc null) — "Newbie", "Y", "TBY", "TB", "TB+", "TBK", "K", …
 - shuttlecock        (string hoặc null) — "95%" hoặc "new" hoặc null
 - notes              (string hoặc null)
+- is_full            (boolean) — true nếu bài đã thông báo đủ người (đã đủ, full người, \
+đủ r, đủ slot, hết chỗ, v.v.), false nếu vẫn đang tìm người
 
 Chỉ trả về JSON array, không có văn bản thêm.
 """
@@ -67,6 +71,7 @@ class ParsedPost:
     level: Optional[str]
     shuttlecock: Optional[str]
     notes: Optional[str]
+    is_full: bool = False
 
 
 _EMPTY = ParsedPost(
@@ -78,6 +83,7 @@ _EMPTY = ParsedPost(
     level=None,
     shuttlecock=None,
     notes=None,
+    is_full=False,
 )
 
 
@@ -177,6 +183,7 @@ def _parse_item(data: dict) -> ParsedPost:
         level=_to_str(data.get("level")),
         shuttlecock=_to_str(data.get("shuttlecock")),
         notes=_to_str(data.get("notes")),
+        is_full=bool(data.get("is_full", False)),
     )
 
 

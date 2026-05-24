@@ -1,6 +1,6 @@
 import sqlite3
 from dataclasses import dataclass, asdict, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -25,6 +25,7 @@ class Post:
     level: Optional[str] = None
     shuttlecock: Optional[str] = None
     notes: Optional[str] = None
+    is_full: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +47,8 @@ CREATE TABLE IF NOT EXISTS posts (
     location           TEXT,
     level              TEXT,
     shuttlecock        TEXT,
-    notes              TEXT
+    notes              TEXT,
+    is_full            INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS groups (
@@ -81,6 +83,31 @@ def _connect(db_path: str) -> sqlite3.Connection:
 def init_db(db_path: str) -> None:
     with _connect(db_path) as conn:
         conn.executescript(_SCHEMA)
+        # Migrate existing databases that predate the is_full column
+        try:
+            conn.execute("ALTER TABLE posts ADD COLUMN is_full INTEGER")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
+
+def cleanup_old_posts(db_path: str) -> int:
+    """Delete posts that are no longer relevant:
+    - play_datetime_iso is in the past (match time has already passed), or
+    - fetched more than 2 days ago.
+    Returns the number of deleted rows.
+    """
+    now = datetime.now().isoformat()
+    two_days_ago = (datetime.now() - timedelta(days=2)).isoformat()
+    with _connect(db_path) as conn:
+        result = conn.execute(
+            """
+            DELETE FROM posts
+            WHERE (play_datetime_iso IS NOT NULL AND play_datetime_iso < ?)
+               OR fetched_at < ?
+            """,
+            (now, two_days_ago),
+        )
+    return result.rowcount
 
 
 def upsert_post(db_path: str, post: Post) -> None:

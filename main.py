@@ -80,6 +80,7 @@ def fetch(
     from scraper.facebook import extract_group_id, fetch_group_posts
     from storage.database import (
         Post,
+        cleanup_old_posts,
         get_cached_ids,
         init_db,
         list_keywords,
@@ -90,6 +91,9 @@ def fetch(
 
     _validate_config(settings)
     init_db(settings.db_path)
+    deleted = cleanup_old_posts(settings.db_path)
+    if deleted:
+        console.print(f"[dim]Cleaned up {deleted} stale post(s) from database.[/dim]")
 
     # --latest N overrides both --hours and --max-posts
     if latest is not None:
@@ -184,7 +188,11 @@ def fetch(
                     parsed = parse_posts_batch(batch_input, llm, today)
 
                 now_iso = datetime.now().isoformat()
+                full_skipped = 0
                 for raw, p in zip(new_posts, parsed):
+                    if p.is_full:
+                        full_skipped += 1
+                        continue
                     upsert_post(
                         settings.db_path,
                         Post(
@@ -202,15 +210,21 @@ def fetch(
                             level=p.level,
                             shuttlecock=p.shuttlecock,
                             notes=p.notes,
+                            is_full=1 if p.is_full else 0,
                         ),
                     )
 
-                badminton_count = sum(1 for p in parsed if p.is_badminton_post)
+                if full_skipped:
+                    console.print(
+                        f"  [dim]Skipped {full_skipped} post(s) already marked as full.[/dim]"
+                    )
+                saved_count = len(new_posts) - full_skipped
+                badminton_count = sum(1 for p in parsed if p.is_badminton_post and not p.is_full)
                 console.print(
-                    f"  [green]✓ Saved {len(new_posts)} posts "
+                    f"  [green]✓ Saved {saved_count} posts "
                     f"({badminton_count} badminton-related).[/green]"
                 )
-                total_new += len(new_posts)
+                total_new += saved_count
         finally:
             context.close()
 
