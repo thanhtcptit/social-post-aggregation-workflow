@@ -1,7 +1,8 @@
 import hashlib
+import json
+import os
 import shutil
 import subprocess
-import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -18,19 +19,41 @@ def get_profile_dir(email: str, base_dir: str) -> str:
     return str(path)
 
 
-def ensure_logged_in(playwright, profile_dir: str, email: str, password: str, headless: bool = True, chrome_profile: str = "Default"):
+def ensure_logged_in(
+    playwright,
+    profile_dir: str,
+    email: str,
+    password: str,
+    headless: bool = True,
+    chrome_profile: str = "Default",
+    fb_cookies_json: str = "",
+):
     """
     Launch a persistent browser context and ensure we are logged in to Facebook.
 
     Strategy:
-      1. Launch with the saved profile.
-      2. Check if the session is still valid.
+      1. If fb_cookies_json is set, inject those cookies directly (bypass Chrome).
+      2. Launch with the saved profile and check if the session is still valid.
       3. If credentials are provided, attempt automatic login.
-      4. If not logged in, instruct the user to log in via their own Chrome
-         browser and read the cookies from the specified chrome_profile.
+      4. If not logged in, open the user's real Chrome profile for manual login.
 
     Returns (context, page) — callers must close context when done.
     """
+    # Fast-path: caller supplied cookies from .env — no browser launch needed
+    if fb_cookies_json and fb_cookies_json.strip() not in ("", "{}", "[]"):
+        fb_cookies = _parse_fb_cookies(fb_cookies_json)
+        context = _launch_context(playwright, profile_dir, headless=headless)
+        context.add_cookies(fb_cookies)
+        page = context.new_page()
+        if _is_logged_in(page):
+            print("[Auth] Logged in via FB_COOKIES from .env.")
+            return context, page
+        context.close()
+        raise RuntimeError(
+            "FB_COOKIES were injected but Facebook still shows the login page.\n"
+            "The cookies may have expired — please refresh them from Chrome DevTools."
+        )
+
     context = _launch_context(playwright, profile_dir, headless=headless)
     page = context.new_page()
 
@@ -62,6 +85,21 @@ def ensure_logged_in(playwright, profile_dir: str, email: str, password: str, he
             "Please make sure you completed the login before pressing Enter."
         )
     return context, page
+
+
+def _parse_fb_cookies(fb_cookies_json: str) -> list:
+    """Parse FB_COOKIES value — accepts a JSON array of cookie objects."""
+    try:
+        cookies = json.loads(fb_cookies_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"FB_COOKIES is not valid JSON: {exc}\n"
+            "Expected a JSON array, e.g. "
+            '[{"name":"c_user","value":"...","domain":".facebook.com","path":"/"}]'
+        ) from exc
+    if not isinstance(cookies, list):
+        raise ValueError("FB_COOKIES must be a JSON array ([...]).")
+    return cookies
 
 
 # ---------------------------------------------------------------------------
@@ -107,14 +145,18 @@ def _manual_login_via_chrome(playwright, chrome_profile: str = "Default") -> lis
             "Install it from https://www.google.com/chrome and try again."
         )
 
-    tmp_profile = tempfile.mkdtemp(prefix="chrome_fb_login_")
+    chrome_user_data = _find_chrome_user_data_dir()
 
-    print("\n[Auth] Opening Chrome for manual Facebook login...")
+    print(
+        f"\n[Auth] Opening Chrome with profile '{chrome_profile}' for manual Facebook login..."
+        "\n       If Chrome is already open, please close it first so the debugging port can be attached."
+    )
 
     proc = subprocess.Popen(
         [
             str(chrome_exe),
-            f"--user-data-dir={tmp_profile}",
+            f"--user-data-dir={chrome_user_data}",
+            f"--profile-directory={chrome_profile}",
             "--remote-debugging-port=9222",
             "--no-first-run",
             "--no-default-browser-check",
@@ -137,7 +179,6 @@ def _manual_login_via_chrome(playwright, chrome_profile: str = "Default") -> lis
 
     if not ready:
         proc.kill()
-        shutil.rmtree(tmp_profile, ignore_errors=True)
         raise RuntimeError(
             "Chrome started but --remote-debugging-port=9222 never became available.\n"
             "A system Chrome policy may be blocking remote debugging.\n"
@@ -167,7 +208,6 @@ def _manual_login_via_chrome(playwright, chrome_profile: str = "Default") -> lis
     except Exception:
         pass
     proc.terminate()
-    shutil.rmtree(tmp_profile, ignore_errors=True)
 
     fb_cookies = [c for c in all_cookies if "facebook.com" in c.get("domain", "")]
     if not fb_cookies:
@@ -198,11 +238,9 @@ def _is_logged_in(page) -> bool:
     # Login form still present = not logged in
     if page.query_selector("#email") is not None:
         return False
-    # Positive check: the news feed element is only present when logged in
-    if page.query_selector("div[role='feed']") is not None:
-        return True
-    # If no login form but also no feed, be conservative — treat as not logged in
-    return False
+    # If we're not on a login/checkpoint page and there's no login form,
+    # treat as logged in (feed may not render in headless Chromium layout)
+    return True
 
 
 def _auto_login(page, email: str, password: str) -> bool:
@@ -240,9 +278,20 @@ def _auto_login(page, email: str, password: str) -> bool:
         return False
 
 
+def _find_chrome_user_data_dir() -> str:
+    """Return the Chrome user data directory on Windows."""
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    path = Path(local_app_data) / "Google" / "Chrome" / "User Data"
+    if path.exists():
+        return str(path)
+    raise RuntimeError(
+        f"Chrome user data directory not found at {path}. "
+        "Please verify Chrome is installed."
+    )
+
+
 def _find_chrome_exe() -> str:
     """Locate the Google Chrome executable on Windows."""
-    import shutil
     candidates = [
         Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
         Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),

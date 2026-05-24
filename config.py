@@ -26,7 +26,13 @@ class Settings(BaseSettings):
     # Chrome profile to read cookies from during manual login
     # Run `chrome://version` in Chrome to see your profile path.
     # Use the folder name only, e.g. "Default", "Profile 1", "Profile 2".
-    chrome_profile: str = "Default"
+    chrome_profile: str = "Profile 1"
+
+    # Fallback: paste Facebook cookies as a JSON array when Chrome remote
+    # debugging is blocked.  Format (minimum required fields):
+    # FB_COOKIES=[{"name":"c_user","value":"...","domain":".facebook.com","path":"/"},
+    #             {"name":"xs","value":"...","domain":".facebook.com","path":"/"}]
+    fb_cookies: str = ""
 
 
 settings = Settings()

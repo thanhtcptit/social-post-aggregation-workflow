@@ -55,10 +55,12 @@ def fetch_group_posts(
     max_posts: int,
     context,
     stop_at_ids: Optional[set] = None,
+    on_progress=None,
 ) -> list:
     """
     Scrape up to *max_posts* posts from the Facebook group at *group_url*.
     Already-cached post IDs in *stop_at_ids* are skipped.
+    Calls on_progress(collected, max_posts) after each new post is found.
     Returns a list of RawPost objects.
     """
     if stop_at_ids is None:
@@ -79,7 +81,7 @@ def fetch_group_posts(
         _dismiss_popups(page)
         time.sleep(3)
 
-        raw_posts = _scroll_and_collect(page, max_posts, stop_at_ids)
+        raw_posts = _scroll_and_collect(page, max_posts, stop_at_ids, on_progress)
     finally:
         page.close()
 
@@ -188,7 +190,7 @@ def _extract_timestamp(article) -> Optional[str]:
     return None
 
 
-def _scroll_and_collect(page, max_posts: int, stop_at_ids: set) -> list:
+def _scroll_and_collect(page, max_posts: int, stop_at_ids: set, on_progress=None) -> list:
     """
     Scroll the group feed, extract posts, and return up to *max_posts* items
     that are not in *stop_at_ids*.
@@ -248,6 +250,8 @@ def _scroll_and_collect(page, max_posts: int, stop_at_ids: set) -> list:
                         "post_time": post_time,
                     }
                 )
+                if on_progress:
+                    on_progress(len(collected), max_posts)
                 found_new = True
 
             except Exception:

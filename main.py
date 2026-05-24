@@ -18,6 +18,7 @@ from typing import Optional
 
 import typer
 from rich.console import Console
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from rich.table import Table
 from rich import print as rprint
 
@@ -127,6 +128,7 @@ def fetch(
         context, _ = ensure_logged_in(
             pw, profile_dir, settings.fb_email, settings.fb_password,
             headless=headless, chrome_profile=settings.chrome_profile,
+            fb_cookies_json=settings.fb_cookies,
         )
         try:
             for url in urls:
@@ -140,9 +142,20 @@ def fetch(
                     f"already_cached={len(cached_ids)}[/dim]"
                 )
 
-                with console.status("[bold green]Scraping…"):
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[bold green]Scraping[/bold green] [cyan]{task.description}[/cyan]"),
+                    BarColumn(),
+                    MofNCompleteColumn(),
+                    TaskProgressColumn(),
+                    console=console,
+                    transient=True,
+                ) as progress:
+                    task = progress.add_task(gid, total=max_posts)
+                    def _on_progress(collected: int, total: int, _task=task, _progress=progress) -> None:
+                        _progress.update(_task, completed=collected, total=total)
                     raw_posts = fetch_group_posts(
-                        url, hours, max_posts, context, cached_ids
+                        url, hours, max_posts, context, cached_ids, on_progress=_on_progress
                     )
 
                 new_posts = [p for p in raw_posts if p.id not in cached_ids]
