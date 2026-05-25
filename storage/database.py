@@ -23,9 +23,7 @@ class Post:
     play_datetime_iso: Optional[str] = None
     location: Optional[str] = None
     level: Optional[str] = None
-    shuttlecock: Optional[str] = None
     notes: Optional[str] = None
-    is_full: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -46,9 +44,7 @@ CREATE TABLE IF NOT EXISTS posts (
     play_datetime_iso  TEXT,
     location           TEXT,
     level              TEXT,
-    shuttlecock        TEXT,
-    notes              TEXT,
-    is_full            INTEGER
+    notes              TEXT
 );
 
 CREATE TABLE IF NOT EXISTS groups (
@@ -61,6 +57,13 @@ CREATE TABLE IF NOT EXISTS groups (
 CREATE TABLE IF NOT EXISTS keywords (
     keyword   TEXT PRIMARY KEY,
     added_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS scrape_cache (
+    post_id    TEXT NOT NULL,
+    group_id   TEXT NOT NULL,
+    scraped_at TEXT NOT NULL,
+    PRIMARY KEY (post_id, group_id)
 );
 """
 
@@ -83,11 +86,15 @@ def _connect(db_path: str) -> sqlite3.Connection:
 def init_db(db_path: str) -> None:
     with _connect(db_path) as conn:
         conn.executescript(_SCHEMA)
-        # Migrate existing databases that predate the is_full column
+        # Migrate existing databases that predate the scrape_cache table
         try:
-            conn.execute("ALTER TABLE posts ADD COLUMN is_full INTEGER")
+            conn.executescript(
+                "CREATE TABLE IF NOT EXISTS scrape_cache ("
+                "post_id TEXT NOT NULL, group_id TEXT NOT NULL, "
+                "scraped_at TEXT NOT NULL, PRIMARY KEY (post_id, group_id));"
+            )
         except sqlite3.OperationalError:
-            pass  # Column already exists
+            pass
 
 
 def cleanup_old_posts(db_path: str) -> int:
@@ -107,6 +114,13 @@ def cleanup_old_posts(db_path: str) -> int:
             """,
             (now, two_days_ago),
         )
+    return result.rowcount
+
+
+def clear_posts(db_path: str) -> int:
+    """Delete all posts from the database. Returns the number of deleted rows."""
+    with _connect(db_path) as conn:
+        result = conn.execute("DELETE FROM posts")
     return result.rowcount
 
 
@@ -133,6 +147,25 @@ def get_cached_ids(db_path: str, group_id: str) -> set:
     return {row["id"] for row in rows}
 
 
+def get_seen_ids(db_path: str, group_id: str) -> set:
+    """Return all post IDs ever scraped for this group (from scrape_cache)."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT post_id FROM scrape_cache WHERE group_id = ?", (group_id,)
+        ).fetchall()
+    return {row["post_id"] for row in rows}
+
+
+def mark_seen(db_path: str, post_ids: list, group_id: str) -> None:
+    """Record that these post IDs have been scraped so they are never re-processed."""
+    now = datetime.now().isoformat()
+    with _connect(db_path) as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO scrape_cache (post_id, group_id, scraped_at) VALUES (?, ?, ?)",
+            [(pid, group_id, now) for pid in post_ids],
+        )
+
+
 def query_posts(
     db_path: str,
     where_clause: str = "1=1",
@@ -148,7 +181,32 @@ def query_posts(
     all_params = (params or []) + [limit]
     with _connect(db_path) as conn:
         rows = conn.execute(sql, all_params).fetchall()
-    return [Post(**dict(row)) for row in rows]
+    return [Post(**{k: v for k, v in dict(row).items() if k in Post.__dataclass_fields__}) for row in rows]
+
+
+def list_all_posts(
+    db_path: str,
+    group_id: Optional[str] = None,
+    badminton_only: bool = True,
+    limit: int = 50,
+) -> list:
+    """Return posts ordered by play_datetime_iso then post_time, newest first."""
+    conditions: list = []
+    params: list = []
+    if badminton_only:
+        conditions.append("is_badminton_post = 1")
+    if group_id:
+        conditions.append("group_id = ?")
+        params.append(group_id)
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    sql = (
+        f"SELECT * FROM posts {where} "
+        f"ORDER BY play_datetime_iso DESC, post_time DESC LIMIT ?"
+    )
+    params.append(limit)
+    with _connect(db_path) as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [Post(**{k: v for k, v in dict(row).items() if k in Post.__dataclass_fields__}) for row in rows]
 
 
 def upsert_group(
@@ -194,3 +252,42 @@ def list_keywords(db_path: str) -> list:
             "SELECT keyword, added_at FROM keywords ORDER BY keyword"
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def list_seen(
+    db_path: str,
+    group_id: Optional[str] = None,
+    limit: int = 100,
+) -> list:
+    """Return rows from scrape_cache, newest first."""
+    if group_id:
+        sql = (
+            "SELECT post_id, group_id, scraped_at FROM scrape_cache "
+            "WHERE group_id = ? ORDER BY scraped_at DESC LIMIT ?"
+        )
+        params = [group_id, limit]
+    else:
+        sql = (
+            "SELECT post_id, group_id, scraped_at FROM scrape_cache "
+            "ORDER BY scraped_at DESC LIMIT ?"
+        )
+        params = [limit]
+    with _connect(db_path) as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [dict(row) for row in rows]
+
+
+def remove_seen(db_path: str, post_id: str) -> int:
+    """Remove a post ID from scrape_cache. Returns number of rows deleted."""
+    with _connect(db_path) as conn:
+        result = conn.execute(
+            "DELETE FROM scrape_cache WHERE post_id = ?", (post_id,)
+        )
+    return result.rowcount
+
+
+def clear_seen(db_path: str) -> int:
+    """Remove all entries from scrape_cache. Returns number of rows deleted."""
+    with _connect(db_path) as conn:
+        result = conn.execute("DELETE FROM scrape_cache")
+    return result.rowcount

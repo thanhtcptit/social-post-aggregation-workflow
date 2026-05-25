@@ -6,12 +6,24 @@ Usage
 -----
   python main.py fetch --group-url URL [--latest 50]
   python main.py fetch --group-url URL [--hours 24] [--max-posts 100]
+  python main.py posts [--limit 50] [--group GROUP_ID] [--all]
   python main.py query "trình độ TBY lúc 7 giờ tối"
   python main.py groups add URL [--name "Group name"]
   python main.py groups list
 """
 
 from __future__ import annotations
+
+import sys as _sys
+
+# On Windows, piped stdout defaults to cp1252 which can't encode Vietnamese
+# characters.  Reconfigure to UTF-8 (with replacement fallback) before any
+# Rich / Typer output is produced.
+if hasattr(_sys.stdout, "reconfigure"):
+    try:
+        _sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 from datetime import datetime
 from typing import Optional
@@ -20,6 +32,7 @@ import typer
 from rich.console import Console
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from rich.table import Table
+from rich.text import Text
 from rich import print as rprint
 
 app = typer.Typer(
@@ -60,9 +73,9 @@ def fetch(
         100, "--max-posts", "-n", help="Maximum posts to fetch per group."
     ),
     headed: bool = typer.Option(
-        False,
-        "--headed",
-        help="Show browser window (useful for first-run login / debugging).",
+        True,
+        "--headed/--headless",
+        help="Show browser window. Defaults to headed; use --headless to hide (Facebook detects headless and may return 0 posts).",
     ),
 ) -> None:
     """Scrape the latest posts from Facebook group(s) and cache them locally.
@@ -73,15 +86,16 @@ def fetch(
     from playwright.sync_api import sync_playwright
 
     from config import settings
-    from filters.keywords import filter_posts
+    from filters.keywords import should_exclude
     from llm.provider import get_provider
-    from parser.post_parser import parse_posts_batch
+    from parser.post_parser import parse_post
     from scraper.auth import ensure_logged_in, get_profile_dir
     from scraper.facebook import extract_group_id, fetch_group_posts
     from storage.database import (
         Post,
         cleanup_old_posts,
-        get_cached_ids,
+        get_seen_ids,
+        mark_seen,
         init_db,
         list_keywords,
         upsert_group,
@@ -95,10 +109,10 @@ def fetch(
     if deleted:
         console.print(f"[dim]Cleaned up {deleted} stale post(s) from database.[/dim]")
 
-    # --latest N overrides both --hours and --max-posts
+    # --latest N overrides --hours and sets a raw scrape cap; stops once N badminton posts found
     if latest is not None:
         hours = 0        # no time constraint
-        max_posts = latest
+        max_posts = min(latest * 10, 500)  # raw cap; break early once N badminton posts are saved
 
     # Resolve which group URLs to process
     if group_url:
@@ -137,18 +151,30 @@ def fetch(
         try:
             for url in urls:
                 gid = extract_group_id(url)
-                cached_ids = get_cached_ids(settings.db_path, gid)
+                # --latest mode: skip ALL previously-seen posts (scrape_cache) so only
+                # genuinely new posts are processed. Increased scroll depth handles cases
+                # where new posts appear below older active posts (RECENT_ACTIVITY sort).
+                # --hours/--max-posts mode: same strategy for efficiency.
+                stop_ids = get_seen_ids(settings.db_path, gid)
 
                 console.print(f"\n[cyan]Group:[/cyan] {gid}")
-                mode_label = f"latest={max_posts}" if latest is not None else f"hours_back={hours}  max_posts={max_posts}"
+                mode_label = f"latest={latest} badminton posts" if latest is not None else f"hours_back={hours}  max_posts={max_posts}"
                 console.print(
                     f"  [dim]{mode_label}  "
-                    f"already_cached={len(cached_ids)}[/dim]"
+                    f"already_seen={len(stop_ids)}[/dim]"
                 )
+
+                now_iso = datetime.now().isoformat()
+                expired_skipped = 0
+                keyword_skipped = 0
+                short_skipped = 0
+                saved_count = 0
+                badminton_count = 0
+                seen_this_run: list = []
 
                 with Progress(
                     SpinnerColumn(),
-                    TextColumn("[bold green]Scraping[/bold green] [cyan]{task.description}[/cyan]"),
+                    TextColumn("[bold green]Fetching & parsing[/bold green] [cyan]{task.description}[/cyan]"),
                     BarColumn(),
                     MofNCompleteColumn(),
                     TaskProgressColumn(),
@@ -158,68 +184,66 @@ def fetch(
                     task = progress.add_task(gid, total=max_posts)
                     def _on_progress(collected: int, total: int, _task=task, _progress=progress) -> None:
                         _progress.update(_task, completed=collected, total=total)
-                    raw_posts = fetch_group_posts(
-                        url, hours, max_posts, context, cached_ids, on_progress=_on_progress
-                    )
+                    for raw_post in fetch_group_posts(
+                        url, hours, max_posts, context, stop_ids, on_progress=_on_progress
+                    ):
+                        if settings.verbose:
+                            console.rule(f"[yellow]Raw post id={raw_post.id}[/yellow]")
+                            console.print(raw_post.raw_text)
 
-                new_posts = [p for p in raw_posts if p.id not in cached_ids]
+                        if len(raw_post.raw_text.split()) < 10:
+                            short_skipped += 1
+                            continue
 
-                # Apply keyword exclusion filter before LLM parsing
-                if exclude_keywords:
-                    new_posts, skipped = filter_posts(new_posts, exclude_keywords)
-                    if skipped:
-                        console.print(
-                            f"  [dim]Skipped {len(skipped)} post(s) matching keyword filters.[/dim]"
+                        if should_exclude(raw_post.raw_text, exclude_keywords):
+                            keyword_skipped += 1
+                            continue
+
+                        p = parse_post(raw_post.raw_text, llm, today, raw_post.post_time)
+
+                        if settings.verbose:
+                            console.rule(f"[blue]Parsed post id={raw_post.id}[/blue]")
+                            console.print(p)
+
+                        if p.play_datetime_iso and p.play_datetime_iso < now_iso:
+                            expired_skipped += 1
+                            continue
+
+                        upsert_post(
+                            settings.db_path,
+                            Post(
+                                id=raw_post.id,
+                                group_id=raw_post.group_id,
+                                post_url=raw_post.post_url,
+                                raw_text=raw_post.raw_text,
+                                fetched_at=now_iso,
+                                post_time=raw_post.post_time,
+                                is_badminton_post=1 if p.is_badminton_post else 0,
+                                players_needed=p.players_needed,
+                                play_datetime_raw=p.play_datetime_raw,
+                                play_datetime_iso=p.play_datetime_iso,
+                                location=p.location,
+                                level=p.level,
+                                notes=None,
+                            ),
                         )
+                        seen_this_run.append(raw_post.id)
+                        saved_count += 1
+                        if p.is_badminton_post:
+                            badminton_count += 1
+                            if latest is not None and badminton_count >= latest:
+                                break
 
-                console.print(
-                    f"  Fetched [bold]{len(raw_posts)}[/bold] posts "
-                    f"([bold]{len(new_posts)}[/bold] new after filters)"
-                )
+                if seen_this_run:
+                    mark_seen(settings.db_path, seen_this_run, gid)
 
-                if not new_posts:
-                    console.print("  [dim]Nothing new to parse.[/dim]")
-                    continue
-
-                batch_input = [{"text": p.raw_text, "post_time": p.post_time} for p in new_posts]
-                with console.status(
-                    f"[bold green]Parsing {len(new_posts)} posts with LLM…"
-                ):
-                    parsed = parse_posts_batch(batch_input, llm, today)
-
-                now_iso = datetime.now().isoformat()
-                full_skipped = 0
-                for raw, p in zip(new_posts, parsed):
-                    if p.is_full:
-                        full_skipped += 1
-                        continue
-                    upsert_post(
-                        settings.db_path,
-                        Post(
-                            id=raw.id,
-                            group_id=raw.group_id,
-                            post_url=raw.post_url,
-                            raw_text=raw.raw_text,
-                            fetched_at=now_iso,
-                            post_time=raw.post_time,
-                            is_badminton_post=1 if p.is_badminton_post else 0,
-                            players_needed=p.players_needed,
-                            play_datetime_raw=p.play_datetime_raw,
-                            play_datetime_iso=p.play_datetime_iso,
-                            location=p.location,
-                            level=p.level,
-                            shuttlecock=p.shuttlecock,
-                            notes=p.notes,
-                            is_full=1 if p.is_full else 0,
-                        ),
-                    )
-
-                if full_skipped:
-                    console.print(
-                        f"  [dim]Skipped {full_skipped} post(s) already marked as full.[/dim]"
-                    )
-                saved_count = len(new_posts) - full_skipped
-                badminton_count = sum(1 for p in parsed if p.is_badminton_post and not p.is_full)
+                console.print(f"  Saved [bold]{len(seen_this_run)}[/bold] new post(s) to cache")
+                if short_skipped:
+                    console.print(f"  [dim]Skipped {short_skipped} post(s) with fewer than 10 words.[/dim]")
+                if keyword_skipped:
+                    console.print(f"  [dim]Skipped {keyword_skipped} post(s) matching keyword filters.[/dim]")
+                if expired_skipped:
+                    console.print(f"  [dim]Skipped {expired_skipped} post(s) with play time already passed.[/dim]")
                 console.print(
                     f"  [green]✓ Saved {saved_count} posts "
                     f"({badminton_count} badminton-related).[/green]"
@@ -232,6 +256,142 @@ def fetch(
         f"\n[bold green]Done.[/bold green] "
         f"{total_new} new post(s) fetched and cached in [dim]{settings.db_path}[/dim]."
     )
+
+
+# ---------------------------------------------------------------------------
+# query
+# ---------------------------------------------------------------------------
+
+@app.command()
+def posts(
+    limit: int = typer.Option(
+        50, "--limit", "-l", help="Maximum number of posts to display."
+    ),
+    group: Optional[str] = typer.Option(
+        None, "--group", "-g", help="Filter by group ID or slug."
+    ),
+    all_posts: bool = typer.Option(
+        False, "--all", help="Include non-badminton posts."
+    ),
+) -> None:
+    """View cached posts from the local database."""
+    from config import settings
+    from storage.database import init_db, list_all_posts
+
+    init_db(settings.db_path)
+    results = list_all_posts(
+        settings.db_path,
+        group_id=group,
+        badminton_only=not all_posts,
+        limit=limit,
+    )
+
+    if not results:
+        rprint(
+            "[yellow]No posts found.[/yellow]  "
+            "Run [bold]fetch[/bold] to populate the database."
+        )
+        raise typer.Exit(0)
+
+    title = "Cached Posts"
+    if group:
+        title += f" — group: {group}"
+    if all_posts:
+        title += " (all)"
+
+    table = Table(title=title, show_lines=True, highlight=True)
+    table.add_column("#", style="dim", justify="right", no_wrap=True)
+    table.add_column("Play Time", style="cyan", min_width=16)
+    table.add_column("Level", style="bold green", min_width=6, justify="center")
+    table.add_column("Location", style="yellow", min_width=16)
+    table.add_column("Need", style="magenta", min_width=4, justify="center")
+    table.add_column("Fetched", style="dim", min_width=10, no_wrap=True)
+    table.add_column("Link", justify="center", min_width=6, no_wrap=True)
+
+    for i, post in enumerate(results, start=1):
+        iso = post.play_datetime_iso
+        play_time = iso.replace("T", " ") if iso else (post.play_datetime_raw or post.post_time or "?")
+        fetched = (post.fetched_at or "")[:10]
+        url = post.post_url or ""
+        url_cell = Text("↗ open", style=f"cyan link {url}") if url else Text("?", style="dim")
+        table.add_row(
+            str(i),
+            play_time,
+            post.level or "?",
+            post.location or "?",
+            str(post.players_needed) if post.players_needed else "?",
+            fetched,
+            url_cell,
+        )
+
+    console.print(table)
+    console.print(f"[dim]{len(results)} post(s) shown (limit={limit}).[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# seen
+# ---------------------------------------------------------------------------
+
+@app.command()
+def seen(
+    limit: int = typer.Option(
+        100, "--limit", "-l", help="Maximum number of entries to display."
+    ),
+    group: Optional[str] = typer.Option(
+        None, "--group", "-g", help="Filter by group ID or slug."
+    ),
+    remove: Optional[str] = typer.Option(
+        None, "--remove", "-r", help="Remove a post ID from the scrape cache so it will be fetched again."
+    ),
+    clear: bool = typer.Option(
+        False, "--clear", help="Remove ALL entries from the scrape cache so every post will be fetched again."
+    ),
+) -> None:
+    """Show post IDs that have already been scraped (will not be fetched again)."""
+    from config import settings
+    from storage.database import init_db, list_seen, remove_seen, clear_seen
+
+    init_db(settings.db_path)
+
+    if clear:
+        count = clear_seen(settings.db_path)
+        rprint(f"[green]Cleared [bold]{count}[/bold] entry/entries from scrape cache.[/green]")
+        raise typer.Exit(0)
+
+    if remove:
+        deleted = remove_seen(settings.db_path, remove)
+        if deleted:
+            rprint(f"[green]Removed post ID [bold]{remove}[/bold] from scrape cache.[/green]")
+        else:
+            rprint(f"[yellow]Post ID [bold]{remove}[/bold] not found in scrape cache.[/yellow]")
+        raise typer.Exit(0)
+
+    rows = list_seen(settings.db_path, group_id=group, limit=limit)
+
+    if not rows:
+        rprint("[yellow]No seen posts recorded yet.[/yellow]")
+        raise typer.Exit(0)
+
+    title = "Seen Posts (scrape cache)"
+    if group:
+        title += f" — group: {group}"
+
+    table = Table(title=title, show_lines=True, highlight=True)
+    table.add_column("#", style="dim", justify="right", no_wrap=True)
+    table.add_column("Post ID", style="cyan", no_wrap=True)
+    table.add_column("Group ID", style="yellow", no_wrap=True)
+    table.add_column("Scraped At", style="dim", no_wrap=True)
+
+    for i, row in enumerate(rows, start=1):
+        table.add_row(
+            str(i),
+            row["post_id"],
+            row["group_id"],
+            (row["scraped_at"] or "")[:19],
+        )
+
+    console.print(table)
+    console.print(f"[dim]{len(rows)} entry/entries shown (limit={limit}).[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -272,23 +432,21 @@ def query(
         show_lines=True,
         highlight=True,
     )
-    table.add_column("Time", style="cyan", min_width=14, no_wrap=True)
+    table.add_column("Time", style="cyan", min_width=14)
     table.add_column("Level", style="bold green", min_width=6, justify="center")
     table.add_column("Location", style="yellow", min_width=16)
     table.add_column("Need", style="magenta", min_width=4, justify="center")
-    table.add_column("Shuttle", style="blue", min_width=7, justify="center")
-    table.add_column("Notes", style="dim", max_width=35)
-    table.add_column("URL", style="dim", max_width=55)
+    table.add_column("Notes", style="dim")
+    table.add_column("URL", style="dim")
 
     for post in results:
         time_str = post.play_datetime_raw or post.post_time or "?"
         table.add_row(
-            (time_str or "")[:20],
+            time_str or "?",
             post.level or "?",
-            (post.location or "?")[:20],
+            post.location or "?",
             str(post.players_needed) if post.players_needed else "?",
-            post.shuttlecock or "?",
-            (post.notes or "")[:35],
+            post.notes or "",
             post.post_url or "?",
         )
 
@@ -401,6 +559,32 @@ def keywords_list() -> None:
     for row in rows:
         table.add_row(row["keyword"], (row.get("added_at") or "")[:10])
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# clear-posts
+# ---------------------------------------------------------------------------
+
+@app.command("clear-posts")
+def clear_posts_cmd(
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip confirmation prompt."
+    ),
+) -> None:
+    """Delete ALL posts from the local database."""
+    from config import settings
+    from storage.database import clear_posts, init_db
+
+    init_db(settings.db_path)
+
+    if not yes:
+        typer.confirm(
+            "This will delete ALL posts from the database. Continue?",
+            abort=True,
+        )
+
+    deleted = clear_posts(settings.db_path)
+    rprint(f"[green]Deleted {deleted} post(s) from the database.[/green]")
 
 
 # ---------------------------------------------------------------------------

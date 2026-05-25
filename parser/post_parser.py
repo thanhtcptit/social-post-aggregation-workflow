@@ -7,54 +7,58 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = """\
-Bạn là trợ lý phân tích bài đăng trong nhóm cầu lông Việt Nam trên Facebook.
-Ngày hôm nay là {today}.
+You are an assistant that extracts structured data from Vietnamese Facebook posts in badminton groups.
+Today is {today}.
 {post_time_context}
-Trích xuất thông tin có cấu trúc từ bài đăng và trả về JSON với các trường sau:
-- is_badminton_post  (boolean) — true nếu đây là bài tìm người đánh cầu lông
-- players_needed     (integer hoặc null) — số người cần tìm
-- play_datetime_raw  (string hoặc null) — thời gian chơi nguyên văn trong bài
-- play_datetime_iso  (string hoặc null) — ISO 8601 nếu xác định được (ví dụ: "2026-05-21T19:00"), \
-null nếu mơ hồ
-- location           (string hoặc null) — địa điểm / sân
-- level              (string hoặc null) — trình độ yêu cầu; các giá trị phổ biến: \
-"Newbie", "Y", "TBY", "TB", "TB+", "TBK", "K", "Khá"
-- shuttlecock        (string hoặc null) — loại cầu: "95%" cho cầu qua sử dụng, \
-"new" cho cầu mới; null nếu không đề cập
-- notes              (string hoặc null) — thông tin bổ sung quan trọng khác
-- is_full            (boolean) — true nếu bài đã thông báo đủ người (đã đủ, full người, \
-đủ r, đủ slot, hết chỗ, v.v.), false nếu vẫn đang tìm người
+Extract the following fields and return valid JSON:
+- is_badminton_post  (boolean) — true if this post is looking for badminton players
+- players_needed     (integer or null) — number of players needed
+- play_datetime_raw  (string or null) — play time exactly as written in the post
+- play_datetime_iso  (string or null) — ISO 8601 datetime if a single specific date/time can be
+  determined (e.g. "2026-05-25T19:00"); null if ambiguous or a recurring weekly schedule
+- location           (string or null) — full venue name and address; strip leading prepositions
+  like "Tại"/"tại" but keep venue-type words like "Sân"/"sân"; never truncate, capture the
+  complete string including street name and district
+- level              (string or null) — skill level; common values: "Newbie", "Y", "TBY", "TB",
+  "TB+", "TBK", "K", "Khá"
 
-Quy tắc:
-- Nếu không phải bài tìm người đánh cầu, đặt is_badminton_post=false và các trường còn lại là null.
-- Nếu có nhiều trình độ được đề cập, ghi tất cả vào trường `level` (ví dụ: "TB-TB+").
-- Để xác định play_datetime_iso: dùng thời gian đăng bài làm mốc để suy ra ngày tuyệt đối \
-cho các cụm từ tương đối như "tối nay", "ngày mai", "thứ 4", "CN tuần này", v.v.
-- Chỉ trả về JSON, không có văn bản thêm.
+Rules:
+- If not a badminton player-search post, set is_badminton_post=false and all other fields to null.
+- If multiple skill levels are mentioned, combine them (e.g. "TB-TB+").
+- For play_datetime_iso: use the post timestamp as a reference to resolve relative expressions
+  such as "tối nay" (tonight), "ngày mai" (tomorrow), "thứ 4" (Wednesday), "CN tuần này"
+  (this Sunday), etc.
+- If no explicit date is mentioned and the post was made today, assume the play date is today.
+- If a recurring weekly schedule is mentioned (e.g. "thứ 2.4.6", "every Mon/Wed/Fri"),
+  set play_datetime_iso=null and keep the raw expression in play_datetime_raw.
+- Return only the JSON object, no extra text.
 """
 
 _BATCH_SYSTEM_PROMPT = """\
-Bạn là trợ lý phân tích bài đăng trong nhóm cầu lông Việt Nam trên Facebook.
-Ngày hôm nay là {today}.
+You are an assistant that extracts structured data from Vietnamese Facebook posts in badminton groups.
+Today is {today}.
 
-Phân tích danh sách bài đăng bên dưới và trả về JSON array với đúng {n} phần tử, \
-theo đúng thứ tự bài đăng.
-Mỗi bài có ghi thời điểm đăng (nếu có) — dùng đó làm mốc để suy ra ngày tuyệt đối \
-cho các cụm từ tương đối như "tối nay", "ngày mai", "thứ 4", "CN tuần này", v.v.
+Analyze the list of posts below and return a JSON array with exactly {n} elements in the same order.
+Each post may include its post timestamp — use it as a reference to resolve relative date expressions
+such as "tối nay" (tonight), "ngày mai" (tomorrow), "thứ 4" (Wednesday), "CN tuần này" (this Sunday).
 
-Mỗi phần tử có các trường:
+Each element has these fields:
 - is_badminton_post  (boolean)
-- players_needed     (integer hoặc null)
-- play_datetime_raw  (string hoặc null)
-- play_datetime_iso  (string ISO 8601 hoặc null)
-- location           (string hoặc null)
-- level              (string hoặc null) — "Newbie", "Y", "TBY", "TB", "TB+", "TBK", "K", …
-- shuttlecock        (string hoặc null) — "95%" hoặc "new" hoặc null
-- notes              (string hoặc null)
-- is_full            (boolean) — true nếu bài đã thông báo đủ người (đã đủ, full người, \
-đủ r, đủ slot, hết chỗ, v.v.), false nếu vẫn đang tìm người
+- players_needed     (integer or null)
+- play_datetime_raw  (string or null)
+- play_datetime_iso  (string ISO 8601 or null) — null if ambiguous or a recurring weekly schedule
+- location           (string or null) — full venue name and address; strip leading prepositions
+  like "Tại"/"tại" but keep venue-type words like "Sân"/"sân"; never truncate, capture the
+  complete string including street name and district
+- level              (string or null) — "Newbie", "Y", "TBY", "TB", "TB+", "TBK", "K", …
 
-Chỉ trả về JSON array, không có văn bản thêm.
+Rules:
+- If not a badminton player-search post, set is_badminton_post=false and all other fields to null.
+- If multiple skill levels are mentioned, combine them (e.g. "TB-TB+").
+- If no explicit date is mentioned and the post was made today, assume the play date is today.
+- If a recurring weekly schedule is mentioned (e.g. "thứ 2.4.6", "every Mon/Wed/Fri"),
+  set play_datetime_iso=null and keep the raw expression in play_datetime_raw.
+- Return only the JSON array, no extra text.
 """
 
 # ---------------------------------------------------------------------------
@@ -69,9 +73,6 @@ class ParsedPost:
     play_datetime_iso: Optional[str]
     location: Optional[str]
     level: Optional[str]
-    shuttlecock: Optional[str]
-    notes: Optional[str]
-    is_full: bool = False
 
 
 _EMPTY = ParsedPost(
@@ -81,9 +82,6 @@ _EMPTY = ParsedPost(
     play_datetime_iso=None,
     location=None,
     level=None,
-    shuttlecock=None,
-    notes=None,
-    is_full=False,
 )
 
 
@@ -181,9 +179,6 @@ def _parse_item(data: dict) -> ParsedPost:
         play_datetime_iso=_to_str(data.get("play_datetime_iso")),
         location=_to_str(data.get("location")),
         level=_to_str(data.get("level")),
-        shuttlecock=_to_str(data.get("shuttlecock")),
-        notes=_to_str(data.get("notes")),
-        is_full=bool(data.get("is_full", False)),
     )
 
 

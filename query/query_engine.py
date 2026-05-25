@@ -14,15 +14,14 @@ Phân tích câu truy vấn và trả về JSON với các trường sau:
 - location_contains (string hoặc null) — từ khoá địa điểm
 - hour             (integer 0-23 hoặc null) — giờ chơi cụ thể nếu được nhắc đến
 - time_contains    (string hoặc null) — chuỗi thời gian để tìm kiếm LIKE trong play_datetime_raw
-- shuttlecock      (string hoặc null) — "95%" hoặc "new"
 - players_needed   (integer hoặc null) — số người cần tìm
 - text_contains    (string hoặc null) — từ khoá bất kỳ khác cần tìm trong nội dung bài
 
 Ví dụ:
 - "trình độ TBY lúc 7 giờ tối" →
-  {"level":"TBY","hour":19,"time_contains":"7","location_contains":null,"shuttlecock":null,"players_needed":null,"text_contains":null}
-- "cầu lông quận 1 cầu mới sáng mai" →
-  {"level":null,"hour":null,"time_contains":"sáng","location_contains":"quận 1","shuttlecock":"new","players_needed":null,"text_contains":null}
+  {"level":"TBY","hour":19,"time_contains":"7","location_contains":null,"players_needed":null,"text_contains":null}
+- "cầu lông quận 1 sáng mai" →
+  {"level":null,"hour":null,"time_contains":"sáng","location_contains":"quận 1","players_needed":null,"text_contains":null}
 
 Chỉ trả về JSON, không có văn bản thêm.
 """
@@ -37,7 +36,6 @@ class FilterCriteria:
     location_contains: Optional[str] = None
     hour: Optional[int] = None
     time_contains: Optional[str] = None
-    shuttlecock: Optional[str] = None
     players_needed: Optional[int] = None
     text_contains: Optional[str] = None
 
@@ -92,7 +90,6 @@ def _extract_filters(nl_query: str, llm) -> FilterCriteria:
             location_contains=data.get("location_contains") or None,
             hour=_to_int(data.get("hour")),
             time_contains=data.get("time_contains") or None,
-            shuttlecock=data.get("shuttlecock") or None,
             players_needed=_to_int(data.get("players_needed")),
             text_contains=data.get("text_contains") or None,
         )
@@ -137,15 +134,6 @@ def _build_sql(f: FilterCriteria) -> tuple:
             "(play_datetime_raw LIKE ? OR play_datetime_iso LIKE ?)"
         )
         params.extend([f"%{f.time_contains}%", f"%{f.time_contains}%"])
-
-    if f.shuttlecock:
-        if "new" in f.shuttlecock.lower():
-            conditions.append(
-                "(shuttlecock LIKE '%new%' OR shuttlecock LIKE '%mới%')"
-            )
-        else:
-            conditions.append("shuttlecock LIKE ?")
-            params.append(f"%{f.shuttlecock}%")
 
     if f.players_needed is not None:
         conditions.append("players_needed = ?")

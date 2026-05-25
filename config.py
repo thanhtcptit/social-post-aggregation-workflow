@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     model_name: str = "gpt-4o-mini"
     llm_provider: str = "openai"
 
+    # Debug
+    verbose: bool = False
+
     # Storage
     cookie_path: str = "data/browser_profiles"
     db_path: str = "data/cache.db"

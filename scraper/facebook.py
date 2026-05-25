@@ -25,9 +25,9 @@ def extract_group_id(group_url: str) -> str:
 
 
 def _extract_post_id(href: str) -> Optional[str]:
-    """Pull the numeric post ID out of a Facebook permalink."""
+    """Pull the post ID out of a Facebook permalink (numeric or pfbid format)."""
     for pattern in (
-        r"/posts/(\d+)",
+        r"/posts/([\w-]+)",   # numeric IDs and pfbid0… alphanumeric IDs
         r"/permalink/(\d+)",
         r"story_fbid=(\d+)",
         r"fbid=(\d+)",
@@ -41,6 +41,11 @@ def _extract_post_id(href: str) -> Optional[str]:
 def _normalize_url(href: str) -> str:
     if not href.startswith("http"):
         href = "https://www.facebook.com" + href
+    # Photo URLs encode the identifier in the fbid query param — keep it.
+    if "/photo" in href and "fbid=" in href:
+        m = re.search(r"[?&]fbid=(\d+)", href)
+        if m:
+            return f"https://www.facebook.com/photo?fbid={m.group(1)}"
     # Drop query-string noise but keep path
     return href.split("?")[0].rstrip("/")
 
@@ -56,12 +61,12 @@ def fetch_group_posts(
     context,
     stop_at_ids: Optional[set] = None,
     on_progress=None,
-) -> list:
+):
     """
-    Scrape up to *max_posts* posts from the Facebook group at *group_url*.
-    Already-cached post IDs in *stop_at_ids* are skipped.
+    Scrape up to *max_posts* new posts from the Facebook group at *group_url*.
+    Already-seen post IDs in *stop_at_ids* are skipped.
     Calls on_progress(collected, max_posts) after each new post is found.
-    Returns a list of RawPost objects.
+    Yields RawPost objects one at a time as they are scraped.
     """
     if stop_at_ids is None:
         stop_at_ids = set()
@@ -69,32 +74,36 @@ def fetch_group_posts(
     group_id = extract_group_id(group_url)
 
     # Request newest-first sort
-    if "sorting_setting" not in group_url:
-        sep = "&" if "?" in group_url else "?"
-        feed_url = group_url.rstrip("/") + sep + "sorting_setting=RECENT_ACTIVITY"
-    else:
-        feed_url = group_url
+    # Do NOT append sorting_setting=RECENT_ACTIVITY: that mode shows recent
+    # comment activity, not posts.  The default group feed shows newest posts.
+    feed_url = group_url.rstrip("/")
 
     page = context.new_page()
     try:
-        page.goto(feed_url, wait_until="domcontentloaded", timeout=30_000)
+        page.goto(feed_url, wait_until="load", timeout=30_000)
         _dismiss_popups(page)
-        time.sleep(3)
+        # Give the React app time to bootstrap and load initial articles.
+        # Do NOT scroll here — the warm-up scroll disturbs the initial article
+        # loading cycle and causes the first articles to be virtualized before
+        # the main loop can process them.
+        time.sleep(5)
+        # Wait until the feed container is present (faster than waiting for
+        # /posts/ links which only appear after React renders the articles).
+        try:
+            page.wait_for_selector("[role='feed']", timeout=15_000)
+        except Exception:
+            pass  # proceed with whatever is rendered
 
-        raw_posts = _scroll_and_collect(page, max_posts, stop_at_ids, on_progress)
+        for p in _scroll_and_collect(page, max_posts, stop_at_ids, on_progress):
+            yield RawPost(
+                id=p["id"],
+                group_id=group_id,
+                post_url=p["post_url"],
+                raw_text=p["raw_text"],
+                post_time=p.get("post_time"),
+            )
     finally:
         page.close()
-
-    return [
-        RawPost(
-            id=p["id"],
-            group_id=group_id,
-            post_url=p["post_url"],
-            raw_text=p["raw_text"],
-            post_time=p.get("post_time"),
-        )
-        for p in raw_posts
-    ]
 
 
 # ---------------------------------------------------------------------------
@@ -121,47 +130,69 @@ def _dismiss_popups(page) -> None:
 def _expand_see_more(article) -> None:
     """Click 'See more' / 'Xem thêm' inside an article to reveal full text."""
     try:
-        buttons = article.query_selector_all(
-            "div[role='button'], span[role='button']"
-        )
-        for btn in buttons:
-            label = (btn.inner_text() or "").strip().lower()
-            if label in ("see more", "xem thêm", "xem thêm..."):
-                btn.click()
-                time.sleep(0.4)
-                break
+        # Use JS TreeWalker to find the exact text node and dispatch a bubbling
+        # click event on its parent. dispatchEvent(bubbles=true) is more reliable
+        # than .click() for React-managed DOM nodes.
+        result = article.evaluate("""el => {
+            const targets = ['See more', 'Xem thêm', 'Xem thêm...'];
+            const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+            let node;
+            while ((node = walker.nextNode())) {
+                if (targets.includes(node.textContent.trim())) {
+                    const parent = node.parentElement;
+                    if (parent) {
+                        parent.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }""")
+        if result:
+            time.sleep(1.0)
     except Exception:
         pass
 
 
 def _extract_post_text(article) -> str:
     """
-    Try several selectors in order of preference to get the post body text.
-    Returns the longest non-empty match.
+    Extract the post body text, excluding text inside nested comment articles.
+    Works for both div[role='article'] and plain feed-item div containers.
     """
-    selectors = [
-        "div[data-ad-comet-preview='message']",
-        "div[data-ad-preview='message']",
-        "div[dir='auto']",
-    ]
-    best = ""
-    for sel in selectors:
-        try:
-            el = article.query_selector(sel)
-            if el:
-                text = el.inner_text().strip()
-                if len(text) > len(best):
-                    best = text
-        except Exception:
-            pass
-
-    if not best:
-        try:
-            best = article.inner_text().strip()[:3000]
-        except Exception:
-            pass
-
-    return best
+    try:
+        text = article.evaluate("""el => {
+            // A div is 'in a comment' if it's inside a nested div[role='article']
+            // that is NOT el itself (for the old role=article case).
+            function inComment(node) {
+                const a = node.closest('div[role="article"]');
+                return a !== null && a !== el;
+            }
+            // Priority 1: specific post-body containers.
+            for (const sel of ["[data-ad-comet-preview='message']", "[data-ad-preview='message']"]) {
+                for (const div of el.querySelectorAll(sel)) {
+                    if (inComment(div)) continue;
+                    const t = (div.innerText || '').trim();
+                    if (t) return t;
+                }
+            }
+            // Priority 2: largest div[dir='auto'] not inside a comment article.
+            let best = '';
+            for (const div of el.querySelectorAll('div[dir="auto"]')) {
+                if (inComment(div)) continue;
+                const t = (div.innerText || '').trim();
+                if (t.length > best.length) best = t;
+            }
+            return best || null;
+        }""")
+        if text:
+            return text
+    except Exception:
+        pass
+    # Last resort: first 150 words of the article's visible text.
+    try:
+        return " ".join(article.inner_text().split()[:150])
+    except Exception:
+        return ""
 
 
 def _extract_timestamp(article) -> Optional[str]:
@@ -190,48 +221,82 @@ def _extract_timestamp(article) -> Optional[str]:
     return None
 
 
-def _scroll_and_collect(page, max_posts: int, stop_at_ids: set, on_progress=None) -> list:
+def _scroll_and_collect(page, max_posts: int, stop_at_ids: set, on_progress=None):
     """
-    Scroll the group feed, extract posts, and return up to *max_posts* items
-    that are not in *stop_at_ids*.
+    Scroll the group feed and yield up to *max_posts* new post dicts,
+    skipping any IDs in *stop_at_ids*.
     """
-    collected: list = []
-    seen_ids: set = set()
+    seen_ids: set = set()          # IDs we've yielded (new posts only)
+    seen_all_ids: set = set()      # ALL article IDs encountered including cached
+    count = 0
     # Allow scrolling roughly 3× the requested post count before giving up
-    max_scroll_rounds = max(max_posts * 3, 30)
+    max_scroll_rounds = max(max_posts * 3, 60)
     scroll_round = 0
-    no_new_streak = 0  # consecutive scrolls without new posts
+    # Stop only when the feed stops loading entirely new article IDs.
+    # Using seen_all_ids (not just new ones) handles Facebook's DOM virtualization:
+    # articles are removed from the top as new ones load at the bottom, so the
+    # visible count oscillates rather than growing monotonically.
+    no_discovery_streak = 0
+    no_discovery_limit = 8  # 8 consecutive scrolls with zero new article IDs → end of feed
 
-    while len(collected) < max_posts and scroll_round < max_scroll_rounds:
-        articles = page.query_selector_all("div[role='article']")
-        found_new = False
+    while count < max_posts and scroll_round < max_scroll_rounds:
+        # Query direct children of [role='feed'] — those are post cards.
+        # Fall back to div[role='article'] if no feed container is found.
+        feed_items = page.query_selector_all("[role='feed'] > div")
+        articles = feed_items if feed_items else page.query_selector_all("div[role='article']")
+        found_any_new_article_id = False
+        no_id_skipped = 0
 
         for article in articles:
-            if len(collected) >= max_posts:
+            if count >= max_posts:
                 break
             try:
-                # Find permalink inside this article
                 post_id = None
                 post_url = None
-                for link_sel in (
-                    "a[href*='/posts/']",
-                    "a[href*='/permalink/']",
-                ):
-                    links = article.query_selector_all(link_sel)
-                    for link in links:
-                        href = link.get_attribute("href") or ""
-                        pid = _extract_post_id(href)
-                        if pid:
-                            post_id = pid
-                            post_url = _normalize_url(href)
-                            break
-                    if post_id:
-                        break
+                # getId() rejects links with comment_id/reply_comment_id so comment
+                # threads nested inside post cards are never used as the post ID source.
+                try:
+                    post_info = article.evaluate("""el => {
+                        const re = /\\/posts\\/([\\w-]+)|\\/permalink\\/(\\d+)|[?&](?:story_fbid|fbid)=(\\d+)/;
+                        function getId(href) {
+                            if (/[?&](?:comment_id|reply_comment_id)=/.test(href)) return null;
+                            const m = re.exec(href);
+                            return m ? (m[1]||m[2]||m[3]) : null;
+                        }
+                        // Pass 1: link wrapping a timestamp element (most reliable).
+                        for (const ts of el.querySelectorAll('span[aria-label], abbr[data-utime]')) {
+                            const a = ts.closest('a[href]');
+                            if (a) {
+                                const id = getId(a.getAttribute('href') || '');
+                                if (id) return {id, url: a.getAttribute('href')};
+                            }
+                        }
+                        // Pass 2: any link with a recognisable post-ID pattern.
+                        for (const a of el.querySelectorAll('a[href]')) {
+                            const id = getId(a.getAttribute('href') || '');
+                            if (id) return {id, url: a.getAttribute('href')};
+                        }
+                        return null;
+                    }""")
+                    if post_info:
+                        post_id = post_info["id"]
+                        post_url = _normalize_url(post_info["url"])
+                except Exception:
+                    pass
 
                 if not post_id:
+                    no_id_skipped += 1
                     continue
+
+                if post_id in seen_all_ids:
+                    continue  # already processed this article this session
+
+                # Mark as discovered (even if cached) to track end-of-feed
+                seen_all_ids.add(post_id)
+                found_any_new_article_id = True
+
                 if post_id in seen_ids or post_id in stop_at_ids:
-                    continue
+                    continue  # already-seen post; don't yield but do count as discovery
 
                 seen_ids.add(post_id)
 
@@ -242,32 +307,35 @@ def _scroll_and_collect(page, max_posts: int, stop_at_ids: set, on_progress=None
                 if not raw_text:
                     continue
 
-                collected.append(
-                    {
-                        "id": post_id,
-                        "post_url": post_url or "",
-                        "raw_text": raw_text,
-                        "post_time": post_time,
-                    }
-                )
+                count += 1
                 if on_progress:
-                    on_progress(len(collected), max_posts)
-                found_new = True
+                    on_progress(count, max_posts)
+                yield {
+                    "id": post_id,
+                    "post_url": post_url or "",
+                    "raw_text": raw_text,
+                    "post_time": post_time,
+                }
 
             except Exception:
                 continue
 
-        if not found_new:
-            no_new_streak += 1
-            if no_new_streak >= 5:
-                # 5 consecutive scrolls with no new posts → probably hit end of feed
-                break
-        else:
-            no_new_streak = 0
+        import sys as _sys
+        _sys.stderr.write(
+            f"[scroll {scroll_round:02d}] visible={len(articles)}"
+            f" no_id={no_id_skipped} unique_ids={len(seen_all_ids)}"
+            f" new_posts={count} streak={no_discovery_streak}\n"
+        )
+        _sys.stderr.flush()
 
-        # Scroll down and wait
-        page.evaluate("window.scrollBy(0, window.innerHeight * 2)")
+        if found_any_new_article_id:
+            no_discovery_streak = 0
+        else:
+            no_discovery_streak += 1
+            if no_discovery_streak >= no_discovery_limit:
+                break  # feed exhausted — no new article IDs for several scrolls
+
+        # Scroll one viewport height (smaller step avoids jumping past lazily-loaded posts)
+        page.evaluate("window.scrollBy(0, window.innerHeight)")
         time.sleep(random.uniform(1.5, 3.0))
         scroll_round += 1
-
-    return collected
