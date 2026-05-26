@@ -197,25 +197,58 @@ def _extract_post_text(article) -> str:
 
 def _extract_timestamp(article) -> Optional[str]:
     """
-    Try to get a human-readable timestamp string from the article.
-    Prefers aria-label (often contains absolute date) over visible relative text.
+    Try to get an ISO-format datetime string from the article.
+    Priority: time[datetime] (ISO) > data-utime (epoch→ISO) > aria-label (text fallback).
     """
     try:
-        # Timestamp links for group posts
-        for sel in (
-            "a[href*='/posts/'] span[aria-label]",
-            "a[href*='/permalink/'] span[aria-label]",
-            "abbr[data-utime]",
-            "a[role='link'] span[aria-label]",
-        ):
-            el = article.query_selector(sel)
-            if el:
-                label = el.get_attribute("aria-label")
-                if label:
-                    return label
-                utime = el.get_attribute("data-utime")
-                if utime:
-                    return utime
+        result = article.evaluate("""el => {
+            // Priority 1: <time datetime="..."> inside a post permalink link
+            for (const sel of [
+                "a[href*='/posts/'] time[datetime]",
+                "a[href*='/permalink/'] time[datetime]",
+                "a[role='link'] time[datetime]",
+                "time[datetime]",
+            ]) {
+                const t = el.querySelector(sel);
+                if (t) {
+                    const dt = t.getAttribute('datetime');
+                    if (dt) return {type: 'iso', value: dt};
+                }
+            }
+            // Priority 2: abbr[data-utime] (legacy Facebook)
+            const abbr = el.querySelector('abbr[data-utime]');
+            if (abbr) {
+                const u = abbr.getAttribute('data-utime');
+                if (u) return {type: 'utime', value: u};
+            }
+            // Priority 3: aria-label on timestamp span (localized text)
+            for (const sel of [
+                "a[href*='/posts/'] span[aria-label]",
+                "a[href*='/permalink/'] span[aria-label]",
+                "a[role='link'] span[aria-label]",
+            ]) {
+                const s = el.querySelector(sel);
+                if (s) {
+                    const label = s.getAttribute('aria-label');
+                    if (label) return {type: 'label', value: label};
+                }
+            }
+            return null;
+        }""")
+        if not result:
+            return None
+        if result["type"] == "iso":
+            return result["value"]
+        if result["type"] == "utime":
+            from datetime import datetime, timezone
+            try:
+                ts = int(result["value"])
+                return datetime.fromtimestamp(ts, tz=timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%S+00:00"
+                )
+            except (ValueError, OSError):
+                return result["value"]
+        return result.get("value")  # aria-label text
     except Exception:
         pass
     return None

@@ -5,7 +5,7 @@ CLI entry point.
 Usage
 -----
   python main.py fetch --group-url URL [--latest 50]
-  python main.py fetch --group-url URL [--hours 24] [--max-posts 100]
+  python main.py fetch --group-url URL [--hours 12] [--max-posts 100]
   python main.py posts [--limit 50] [--group GROUP_ID] [--all]
   python main.py query "trình độ TBY lúc 7 giờ tối"
   python main.py groups add URL [--name "Group name"]
@@ -15,6 +15,7 @@ Usage
 from __future__ import annotations
 
 import sys as _sys
+import hashlib
 
 # On Windows, piped stdout defaults to cp1252 which can't encode Vietnamese
 # characters.  Reconfigure to UTF-8 (with replacement fallback) before any
@@ -67,7 +68,7 @@ def fetch(
         help="Fetch the N most recent posts with no time constraint. Overrides --hours and --max-posts.",
     ),
     hours: int = typer.Option(
-        24, "--hours", "-H", help="How many hours back to look for posts."
+        12, "--hours", "-H", help="How many hours back to look for posts."
     ),
     max_posts: int = typer.Option(
         100, "--max-posts", "-n", help="Maximum posts to fetch per group."
@@ -81,8 +82,11 @@ def fetch(
     """Scrape the latest posts from Facebook group(s) and cache them locally.
 
     Use --latest N to simply grab the N most recent posts regardless of age.
-    Use --hours / --max-posts together for time-windowed fetching.
+    Use --hours / --max-posts together for time-windowed fetching (default: last 12 h).
     """
+    import time as _time
+    _fetch_start = _time.monotonic()
+
     from playwright.sync_api import sync_playwright
 
     from config import settings
@@ -94,10 +98,12 @@ def fetch(
     from storage.database import (
         Post,
         cleanup_old_posts,
+        get_cached_content_hash,
         get_seen_ids,
         mark_seen,
         init_db,
         list_keywords,
+        upsert_content_hash,
         upsert_group,
         upsert_post,
         list_groups,
@@ -168,6 +174,7 @@ def fetch(
                 expired_skipped = 0
                 keyword_skipped = 0
                 short_skipped = 0
+                hash_skipped = 0
                 saved_count = 0
                 badminton_count = 0
                 seen_this_run: list = []
@@ -190,6 +197,13 @@ def fetch(
                         if settings.verbose:
                             console.rule(f"[yellow]Raw post id={raw_post.id}[/yellow]")
                             console.print(raw_post.raw_text)
+
+                        # Skip parsing if content hasn't changed since last scrape
+                        content_hash = hashlib.sha256(raw_post.raw_text.encode()).hexdigest()
+                        if get_cached_content_hash(settings.db_path, raw_post.id) == content_hash:
+                            seen_this_run.append(raw_post.id)
+                            hash_skipped += 1
+                            continue
 
                         if len(raw_post.raw_text.split()) < 10:
                             short_skipped += 1
@@ -228,6 +242,7 @@ def fetch(
                                 notes=None,
                             ),
                         )
+                        upsert_content_hash(settings.db_path, raw_post.id, content_hash)
                         seen_this_run.append(raw_post.id)
                         saved_count += 1
                         if p.is_badminton_post:
@@ -241,6 +256,8 @@ def fetch(
                 console.print(f"  Saved [bold]{len(seen_this_run)}[/bold] new post(s) to cache")
                 if short_skipped:
                     console.print(f"  [dim]Skipped {short_skipped} post(s) with fewer than 10 words.[/dim]")
+                if hash_skipped:
+                    console.print(f"  [dim]Skipped {hash_skipped} post(s) with unchanged content (hash match).[/dim]")
                 if keyword_skipped:
                     console.print(f"  [dim]Skipped {keyword_skipped} post(s) matching keyword filters.[/dim]")
                 if expired_skipped:
@@ -253,9 +270,13 @@ def fetch(
         finally:
             context.close()
 
+    _elapsed = _time.monotonic() - _fetch_start
+    _mins, _secs = divmod(int(_elapsed), 60)
+    _elapsed_str = f"{_mins}m {_secs}s" if _mins else f"{_secs}s"
     console.print(
         f"\n[bold green]Done.[/bold green] "
-        f"{total_new} new post(s) fetched and cached in [dim]{settings.db_path}[/dim]."
+        f"{total_new} new post(s) fetched and cached in [dim]{settings.db_path}[/dim]. "
+        f"[dim](took {_elapsed_str})[/dim]"
     )
 
 

@@ -65,7 +65,7 @@ uv run python main.py fetch --group-url "https://www.facebook.com/groups/<group-
 ### Fetch posts
 
 ```bash
-# Fetch the last 24 hours of posts (up to 100) from a specific group
+# Fetch the last 12 hours of posts (up to 100) from a specific group (default)
 uv run python main.py fetch --group-url "https://www.facebook.com/groups/<group-id>"
 
 # Fetch the 50 most recent posts with no time constraint

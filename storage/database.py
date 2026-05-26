@@ -67,6 +67,12 @@ CREATE TABLE IF NOT EXISTS scrape_cache (
     scraped_at TEXT NOT NULL,
     PRIMARY KEY (post_id, group_id)
 );
+
+CREATE TABLE IF NOT EXISTS content_hash_cache (
+    post_id      TEXT PRIMARY KEY,
+    content_hash TEXT NOT NULL,
+    cached_at    TEXT NOT NULL
+);
 """
 
 
@@ -94,6 +100,15 @@ def init_db(db_path: str) -> None:
                 "CREATE TABLE IF NOT EXISTS scrape_cache ("
                 "post_id TEXT NOT NULL, group_id TEXT NOT NULL, "
                 "scraped_at TEXT NOT NULL, PRIMARY KEY (post_id, group_id));"
+            )
+        except sqlite3.OperationalError:
+            pass
+        # Migrate existing databases that predate the content_hash_cache table
+        try:
+            conn.executescript(
+                "CREATE TABLE IF NOT EXISTS content_hash_cache ("
+                "post_id TEXT PRIMARY KEY, content_hash TEXT NOT NULL, "
+                "cached_at TEXT NOT NULL);"
             )
         except sqlite3.OperationalError:
             pass
@@ -170,6 +185,27 @@ def mark_seen(db_path: str, post_ids: list, group_id: str) -> None:
         conn.executemany(
             "INSERT OR IGNORE INTO scrape_cache (post_id, group_id, scraped_at) VALUES (?, ?, ?)",
             [(pid, group_id, now) for pid in post_ids],
+        )
+
+
+def get_cached_content_hash(db_path: str, post_id: str) -> Optional[str]:
+    """Return the cached content hash for *post_id*, or None if not yet stored."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT content_hash FROM content_hash_cache WHERE post_id = ?",
+            (post_id,),
+        ).fetchone()
+    return row["content_hash"] if row else None
+
+
+def upsert_content_hash(db_path: str, post_id: str, content_hash: str) -> None:
+    """Store or update the content hash for *post_id*."""
+    now = datetime.now().isoformat()
+    with _connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO content_hash_cache (post_id, content_hash, cached_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(post_id) DO UPDATE SET content_hash=excluded.content_hash, cached_at=excluded.cached_at",
+            (post_id, content_hash, now),
         )
 
 

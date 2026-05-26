@@ -195,8 +195,10 @@ def _parse_chunk(posts: list, llm, today: str) -> list:
 
 
 def _extract_date(post_time: Optional[str], today: str) -> str:
-    """Return the YYYY-MM-DD portion of *post_time*, falling back to *today*."""
-    if post_time and len(post_time) >= 10:
+    """Return the YYYY-MM-DD portion of *post_time*, falling back to *today*.
+    Only extracts the date when post_time is in ISO format (YYYY-MM-DD...).
+    """
+    if post_time and re.match(r"^\d{4}-\d{2}-\d{2}", post_time):
         return post_time[:10]
     return today
 
