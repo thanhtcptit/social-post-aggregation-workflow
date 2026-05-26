@@ -220,6 +220,7 @@ def fetch(
                                 post_time=raw_post.post_time,
                                 is_badminton_post=1 if p.is_badminton_post else 0,
                                 players_needed=p.players_needed,
+                                players_gender=p.players_gender,
                                 play_datetime_raw=p.play_datetime_raw,
                                 play_datetime_iso=p.play_datetime_iso,
                                 location=p.location,
@@ -304,7 +305,7 @@ def posts(
     table.add_column("Play Time", style="cyan", min_width=16)
     table.add_column("Level", style="bold green", min_width=6, justify="center")
     table.add_column("Location", style="yellow", min_width=16)
-    table.add_column("Need", style="magenta", min_width=4, justify="center")
+    table.add_column("Need", style="magenta", min_width=8, justify="center")
     table.add_column("Fetched", style="dim", min_width=10, no_wrap=True)
     table.add_column("Link", justify="center", min_width=6, no_wrap=True)
 
@@ -314,12 +315,16 @@ def posts(
         fetched = (post.fetched_at or "")[:10]
         url = post.post_url or ""
         url_cell = Text("↗ open", style=f"cyan link {url}") if url else Text("?", style="dim")
+        need_parts = [str(post.players_needed)] if post.players_needed else []
+        if post.players_gender:
+            need_parts.append(post.players_gender)
+        need_cell = "\n".join(need_parts) if need_parts else "?"
         table.add_row(
             str(i),
             play_time,
             post.level or "?",
             post.location or "?",
-            str(post.players_needed) if post.players_needed else "?",
+            need_cell,
             fetched,
             url_cell,
         )
@@ -432,22 +437,32 @@ def query(
         show_lines=True,
         highlight=True,
     )
-    table.add_column("Time", style="cyan", min_width=14)
+    table.add_column("#", style="dim", justify="right", no_wrap=True)
+    table.add_column("Play Time", style="cyan", min_width=16)
     table.add_column("Level", style="bold green", min_width=6, justify="center")
     table.add_column("Location", style="yellow", min_width=16)
-    table.add_column("Need", style="magenta", min_width=4, justify="center")
-    table.add_column("Notes", style="dim")
-    table.add_column("URL", style="dim")
+    table.add_column("Need", style="magenta", min_width=8, justify="center")
+    table.add_column("Fetched", style="dim", min_width=10, no_wrap=True)
+    table.add_column("Link", justify="center", min_width=6, no_wrap=True)
 
-    for post in results:
-        time_str = post.play_datetime_raw or post.post_time or "?"
+    for i, post in enumerate(results, start=1):
+        iso = post.play_datetime_iso
+        play_time = iso.replace("T", " ") if iso else (post.play_datetime_raw or post.post_time or "?")
+        fetched = (post.fetched_at or "")[:10]
+        url = post.post_url or ""
+        url_cell = Text("↗ open", style=f"cyan link {url}") if url else Text("?", style="dim")
+        need_parts = [str(post.players_needed)] if post.players_needed else []
+        if post.players_gender:
+            need_parts.append(post.players_gender)
+        need_cell = "\n".join(need_parts) if need_parts else "?"
         table.add_row(
-            time_str or "?",
+            str(i),
+            play_time,
             post.level or "?",
             post.location or "?",
-            str(post.players_needed) if post.players_needed else "?",
-            post.notes or "",
-            post.post_url or "?",
+            need_cell,
+            fetched,
+            url_cell,
         )
 
     console.print(table)

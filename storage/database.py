@@ -19,6 +19,7 @@ class Post:
     post_time: Optional[str] = None
     is_badminton_post: Optional[int] = None
     players_needed: Optional[int] = None
+    players_gender: Optional[str] = None
     play_datetime_raw: Optional[str] = None
     play_datetime_iso: Optional[str] = None
     location: Optional[str] = None
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS posts (
     post_time          TEXT,
     is_badminton_post  INTEGER,
     players_needed     INTEGER,
+    players_gender     TEXT,
     play_datetime_raw  TEXT,
     play_datetime_iso  TEXT,
     location           TEXT,
@@ -93,6 +95,11 @@ def init_db(db_path: str) -> None:
                 "post_id TEXT NOT NULL, group_id TEXT NOT NULL, "
                 "scraped_at TEXT NOT NULL, PRIMARY KEY (post_id, group_id));"
             )
+        except sqlite3.OperationalError:
+            pass
+        # Migrate: add players_gender column if absent
+        try:
+            conn.execute("ALTER TABLE posts ADD COLUMN players_gender TEXT")
         except sqlite3.OperationalError:
             pass
 

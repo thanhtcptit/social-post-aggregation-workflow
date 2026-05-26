@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -12,10 +13,16 @@ Today is {today}.
 {post_time_context}
 Extract the following fields and return valid JSON:
 - is_badminton_post  (boolean) — true if this post is looking for badminton players
-- players_needed     (integer or null) — number of players needed
+- players_needed     (integer or null) — number of additional players being recruited
+  (e.g. "Tuyển 2 bạn", "cần 1 nam"); NOT court capacity or max players per session
+  (e.g. "max 8", "tối đa 8 người", "đủ 10 người")
+- players_gender     (string or null) — gender breakdown of players needed as written
+  (e.g. "1 nữ", "2 nam", "1 nam 1 nữ"); null if no gender is specified
 - play_datetime_raw  (string or null) — play time exactly as written in the post
 - play_datetime_iso  (string or null) — ISO 8601 datetime if a single specific date/time can be
   determined (e.g. "2026-05-25T19:00"); null if ambiguous or a recurring weekly schedule
+- play_time_only     (string or null) — time in HH:MM 24-hour format when a time is mentioned
+  but no specific date can be determined (e.g. "19:00"); null otherwise
 - location           (string or null) — full venue name and address; strip leading prepositions
   like "Tại"/"tại" but keep venue-type words like "Sân"/"sân"; never truncate, capture the
   complete string including street name and district
@@ -31,6 +38,8 @@ Rules:
 - If no explicit date is mentioned and the post was made today, assume the play date is today.
 - If a recurring weekly schedule is mentioned (e.g. "thứ 2.4.6", "every Mon/Wed/Fri"),
   set play_datetime_iso=null and keep the raw expression in play_datetime_raw.
+- All times use 24-hour format unless explicitly qualified: "5h" = 05:00, "17h" = 17:00,
+  "8h tối" = 20:00, "8h sáng" = 08:00, "12h trưa" = 12:00.
 - Return only the JSON object, no extra text.
 """
 
@@ -44,9 +53,15 @@ such as "tối nay" (tonight), "ngày mai" (tomorrow), "thứ 4" (Wednesday), "C
 
 Each element has these fields:
 - is_badminton_post  (boolean)
-- players_needed     (integer or null)
+- players_needed     (integer or null) — number of additional players being recruited
+  (e.g. "Tuyển 2 bạn", "cần 1 nam"); NOT court capacity or max players per session
+  (e.g. "max 8", "tối đa 8 người", "đủ 10 người")
+- players_gender     (string or null) — gender breakdown as written (e.g. "1 nữ", "2 nam",
+  "1 nam 1 nữ"); null if no gender specified
 - play_datetime_raw  (string or null)
 - play_datetime_iso  (string ISO 8601 or null) — null if ambiguous or a recurring weekly schedule
+- play_time_only     (string or null) — HH:MM 24-hour time when a time is mentioned but no
+  specific date can be determined; null otherwise
 - location           (string or null) — full venue name and address; strip leading prepositions
   like "Tại"/"tại" but keep venue-type words like "Sân"/"sân"; never truncate, capture the
   complete string including street name and district
@@ -58,6 +73,8 @@ Rules:
 - If no explicit date is mentioned and the post was made today, assume the play date is today.
 - If a recurring weekly schedule is mentioned (e.g. "thứ 2.4.6", "every Mon/Wed/Fri"),
   set play_datetime_iso=null and keep the raw expression in play_datetime_raw.
+- All times use 24-hour format unless explicitly qualified: "5h" = 05:00, "17h" = 17:00,
+  "8h tối" = 20:00, "8h sáng" = 08:00, "12h trưa" = 12:00.
 - Return only the JSON array, no extra text.
 """
 
@@ -69,6 +86,7 @@ Rules:
 class ParsedPost:
     is_badminton_post: bool
     players_needed: Optional[int]
+    players_gender: Optional[str]
     play_datetime_raw: Optional[str]
     play_datetime_iso: Optional[str]
     location: Optional[str]
@@ -78,6 +96,7 @@ class ParsedPost:
 _EMPTY = ParsedPost(
     is_badminton_post=False,
     players_needed=None,
+    players_gender=None,
     play_datetime_raw=None,
     play_datetime_iso=None,
     location=None,
@@ -101,7 +120,8 @@ def parse_post(raw_text: str, llm, today: str, post_time: Optional[str] = None) 
         response = llm.complete(
             system_prompt=system, user_message=raw_text, json_mode=True
         )
-        return _parse_item(json.loads(response))
+        post_date = _extract_date(post_time, today)
+        return _parse_item(json.loads(response), post_date)
     except Exception:
         return _EMPTY
 
@@ -160,7 +180,10 @@ def _parse_chunk(posts: list, llm, today: str) -> list:
         if not isinstance(data, list):
             raise ValueError("Expected JSON array")
 
-        parsed = [_parse_item(item) for item in data[: len(posts)]]
+        parsed = [
+            _parse_item(item, _extract_date(posts[i].get("post_time"), today))
+            for i, item in enumerate(data[: len(posts)])
+        ]
         # Pad if LLM returned fewer items than expected
         while len(parsed) < len(posts):
             parsed.append(parse_post(posts[len(parsed)]["text"], llm, today))
@@ -171,12 +194,25 @@ def _parse_chunk(posts: list, llm, today: str) -> list:
         return [parse_post(p["text"], llm, today, p.get("post_time")) for p in posts]
 
 
-def _parse_item(data: dict) -> ParsedPost:
+def _extract_date(post_time: Optional[str], today: str) -> str:
+    """Return the YYYY-MM-DD portion of *post_time*, falling back to *today*."""
+    if post_time and len(post_time) >= 10:
+        return post_time[:10]
+    return today
+
+
+def _parse_item(data: dict, post_date: Optional[str] = None) -> ParsedPost:
+    play_datetime_iso = _to_str(data.get("play_datetime_iso"))
+    if play_datetime_iso is None and post_date:
+        time_only = _to_str(data.get("play_time_only"))
+        if time_only and re.match(r"^\d{1,2}:\d{2}$", time_only):
+            play_datetime_iso = f"{post_date}T{time_only}"
     return ParsedPost(
         is_badminton_post=bool(data.get("is_badminton_post", False)),
         players_needed=_to_int(data.get("players_needed")),
+        players_gender=_to_str(data.get("players_gender")),
         play_datetime_raw=_to_str(data.get("play_datetime_raw")),
-        play_datetime_iso=_to_str(data.get("play_datetime_iso")),
+        play_datetime_iso=play_datetime_iso,
         location=_to_str(data.get("location")),
         level=_to_str(data.get("level")),
     )
