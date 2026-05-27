@@ -1,6 +1,7 @@
 import json
 import re
 from dataclasses import dataclass
+from datetime import date as _date
 from typing import Optional
 
 # ---------------------------------------------------------------------------
@@ -9,7 +10,7 @@ from typing import Optional
 
 _SYSTEM_PROMPT = """\
 You are an assistant that extracts structured data from Vietnamese Facebook posts in badminton groups.
-Today is {today}.
+Today is {today} ({weekday}).
 {post_time_context}
 Extract the following fields and return valid JSON:
 - is_badminton_post  (boolean) — true if this post is looking for badminton players
@@ -38,6 +39,8 @@ Rules:
 - If no explicit date is mentioned and the post was made today, assume the play date is today.
 - If a recurring weekly schedule is mentioned (e.g. "thứ 2.4.6", "every Mon/Wed/Fri"),
   set play_datetime_iso=null and keep the raw expression in play_datetime_raw.
+- If only a weekday is mentioned with no specific date and no "tuần sau"/"next week" qualifier
+  (e.g. "tối thứ Ba", "sáng thứ Sáu", "CN tối"), assume it refers to that day in the current week.
 - All times use 24-hour format unless explicitly qualified: "5h" = 05:00, "17h" = 17:00,
   "8h tối" = 20:00, "8h sáng" = 08:00, "12h trưa" = 12:00.
 - Return only the JSON object, no extra text.
@@ -45,7 +48,7 @@ Rules:
 
 _BATCH_SYSTEM_PROMPT = """\
 You are an assistant that extracts structured data from Vietnamese Facebook posts in badminton groups.
-Today is {today}.
+Today is {today} ({weekday}).
 
 Analyze the list of posts below and return a JSON array with exactly {n} elements in the same order.
 Each post may include its post timestamp — use it as a reference to resolve relative date expressions
@@ -73,6 +76,8 @@ Rules:
 - If no explicit date is mentioned and the post was made today, assume the play date is today.
 - If a recurring weekly schedule is mentioned (e.g. "thứ 2.4.6", "every Mon/Wed/Fri"),
   set play_datetime_iso=null and keep the raw expression in play_datetime_raw.
+- If only a weekday is mentioned with no specific date and no "tuần sau"/"next week" qualifier
+  (e.g. "tối thứ Ba", "sáng thứ Sáu", "CN tối"), assume it refers to that day in the current week.
 - All times use 24-hour format unless explicitly qualified: "5h" = 05:00, "17h" = 17:00,
   "8h tối" = 20:00, "8h sáng" = 08:00, "12h trưa" = 12:00.
 - Return only the JSON array, no extra text.
@@ -115,7 +120,11 @@ def parse_post(raw_text: str, llm, today: str, post_time: Optional[str] = None) 
         if post_time
         else ""
     )
-    system = _SYSTEM_PROMPT.format(today=today, post_time_context=post_time_context)
+    system = _SYSTEM_PROMPT.format(
+        today=today,
+        weekday=_date.fromisoformat(today).strftime("%A"),
+        post_time_context=post_time_context,
+    )
     try:
         response = llm.complete(
             system_prompt=system, user_message=raw_text, json_mode=True
@@ -154,7 +163,11 @@ def _parse_chunk(posts: list, llm, today: str) -> list:
     if len(posts) == 1:
         return [parse_post(posts[0]["text"], llm, today, posts[0].get("post_time"))]
 
-    system = _BATCH_SYSTEM_PROMPT.format(today=today, n=len(posts))
+    system = _BATCH_SYSTEM_PROMPT.format(
+        today=today,
+        weekday=_date.fromisoformat(today).strftime("%A"),
+        n=len(posts),
+    )
     user_msg = "\n\n".join(
         "--- Bài {n}{ts} ---\n{text}".format(
             n=i + 1,
