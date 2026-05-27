@@ -14,8 +14,19 @@ Usage
 
 from __future__ import annotations
 
+import re
 import sys as _sys
 import hashlib
+
+
+def _normalize_for_hash(text: str) -> str:
+    """Normalize text before hashing so minor formatting differences
+    (case, extra spaces, different line endings) don't bypass deduplication."""
+    text = text.lower()
+    text = text.replace("\r\n", "\n").replace("\r", "\n")  # unify line endings
+    text = re.sub(r"[ \t]+", " ", text)    # collapse horizontal whitespace
+    text = re.sub(r"\n{2,}", "\n", text)   # collapse blank lines
+    return text.strip()
 
 # On Windows, piped stdout defaults to cp1252 which can't encode Vietnamese
 # characters.  Reconfigure to UTF-8 (with replacement fallback) before any
@@ -99,6 +110,7 @@ def fetch(
         Post,
         cleanup_old_posts,
         get_cached_content_hash,
+        is_content_hash_seen,
         get_seen_ids,
         mark_seen,
         init_db,
@@ -198,9 +210,13 @@ def fetch(
                             console.rule(f"[yellow]Raw post id={raw_post.id}[/yellow]")
                             console.print(raw_post.raw_text)
 
-                        # Skip parsing if content hasn't changed since last scrape
-                        content_hash = hashlib.sha256(raw_post.raw_text.encode()).hexdigest()
-                        if get_cached_content_hash(settings.db_path, raw_post.id) == content_hash:
+                        # Skip if this exact content was already processed —
+                        # either the same post_id re-scraped, or a different post
+                        # with identical raw_text (cross-ID duplicate).
+                        content_hash = hashlib.sha256(_normalize_for_hash(raw_post.raw_text).encode()).hexdigest()
+                        if is_content_hash_seen(settings.db_path, content_hash):
+                            # Cache the mapping for this ID so future runs skip faster
+                            upsert_content_hash(settings.db_path, raw_post.id, content_hash)
                             seen_this_run.append(raw_post.id)
                             hash_skipped += 1
                             continue

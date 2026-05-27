@@ -73,10 +73,10 @@ def fetch_group_posts(
 
     group_id = extract_group_id(group_url)
 
-    # Request newest-first sort
-    # Do NOT append sorting_setting=RECENT_ACTIVITY: that mode shows recent
-    # comment activity, not posts.  The default group feed shows newest posts.
-    feed_url = group_url.rstrip("/")
+    # Request newest-first sort via the CHRONOLOGICAL sorting parameter.
+    # We also try to click the UI's "Newest" sort option after the feed
+    # loads so the ordering is explicit.
+    feed_url = group_url.rstrip("/") + "?sorting_setting=CHRONOLOGICAL"
 
     page = context.new_page()
     try:
@@ -125,6 +125,7 @@ def _dismiss_popups(page) -> None:
                 time.sleep(0.5)
         except Exception:
             pass
+
 
 
 def _expand_see_more(article) -> None:

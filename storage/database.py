@@ -112,6 +112,14 @@ def init_db(db_path: str) -> None:
             )
         except sqlite3.OperationalError:
             pass
+        # Index for fast cross-ID duplicate detection
+        try:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_chc_hash "
+                "ON content_hash_cache(content_hash)"
+            )
+        except sqlite3.OperationalError:
+            pass
         # Migrate: add players_gender column if absent
         try:
             conn.execute("ALTER TABLE posts ADD COLUMN players_gender TEXT")
@@ -196,6 +204,16 @@ def get_cached_content_hash(db_path: str, post_id: str) -> Optional[str]:
             (post_id,),
         ).fetchone()
     return row["content_hash"] if row else None
+
+
+def is_content_hash_seen(db_path: str, content_hash: str) -> bool:
+    """Return True if *content_hash* is already stored for ANY post (cross-ID dedup)."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM content_hash_cache WHERE content_hash = ? LIMIT 1",
+            (content_hash,),
+        ).fetchone()
+    return row is not None
 
 
 def upsert_content_hash(db_path: str, post_id: str, content_hash: str) -> None:
