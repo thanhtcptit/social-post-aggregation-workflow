@@ -13,6 +13,7 @@ Phân tích câu truy vấn và trả về JSON với các trường sau:
 - level            (string hoặc null) — trình độ ("Y", "TBY", "TB", "TB+", "TBK", "K", "Newbie", …)
 - location_contains (string hoặc null) — từ khoá địa điểm
 - hour             (integer 0-23 hoặc null) — giờ chơi theo định dạng 24h (ví dụ: "7 giờ tối" → 19, "19h" → 19, "7h sáng" → 7)
+- minute           (integer 0-59 hoặc null) — phút chơi nếu có (ví dụ: "19h30" → 30, "7h45" → 45, "19h" → null)
 - date_iso         (string "YYYY-MM-DD" hoặc null) — ngày chơi nếu được nhắc đến (ví dụ: "ngày 26/5" → "2026-05-26")
 - time_contains    (string hoặc null) — chuỗi thời gian để tìm kiếm LIKE trong play_datetime_raw (chỉ dùng khi không xác định được giờ cụ thể)
 - players_needed   (integer hoặc null) — số người cần tìm
@@ -22,11 +23,11 @@ Năm hiện tại là 2026.
 
 Ví dụ:
 - "trình độ TBY lúc 7 giờ tối" →
-  {"level":"TBY","hour":19,"date_iso":null,"time_contains":null,"location_contains":null,"players_needed":null,"text_contains":null}
+  {"level":"TBY","hour":19,"minute":null,"date_iso":null,"time_contains":null,"location_contains":null,"players_needed":null,"text_contains":null}
 - "cầu lông quận 1 sáng mai" →
-  {"level":null,"hour":null,"date_iso":null,"time_contains":"sáng","location_contains":"quận 1","players_needed":null,"text_contains":null}
-- "sân lúc 19h ngày 26/5" →
-  {"level":null,"hour":19,"date_iso":"2026-05-26","time_contains":null,"location_contains":"sân","players_needed":null,"text_contains":null}
+  {"level":null,"hour":null,"minute":null,"date_iso":null,"time_contains":"sáng","location_contains":"quận 1","players_needed":null,"text_contains":null}
+- "sân lúc 19h30 ngày 26/5" →
+  {"level":null,"hour":19,"minute":30,"date_iso":"2026-05-26","time_contains":null,"location_contains":"sân","players_needed":null,"text_contains":null}
 
 Chỉ trả về JSON, không có văn bản thêm.
 """
@@ -40,6 +41,7 @@ class FilterCriteria:
     level: Optional[str] = None
     location_contains: Optional[str] = None
     hour: Optional[int] = None
+    minute: Optional[int] = None
     date_iso: Optional[str] = None
     time_contains: Optional[str] = None
     players_needed: Optional[int] = None
@@ -54,7 +56,7 @@ def search(
     nl_query: str,
     db_path: str,
     llm,
-    limit: int = 20,
+    limit: int = 50,
 ) -> list:
     """
     Translate *nl_query* into SQL filters via LLM, query SQLite, and return
@@ -95,6 +97,7 @@ def _extract_filters(nl_query: str, llm) -> FilterCriteria:
             level=data.get("level") or None,
             location_contains=data.get("location_contains") or None,
             hour=_to_int(data.get("hour")),
+            minute=_to_int(data.get("minute")),
             date_iso=data.get("date_iso") or None,
             time_contains=data.get("time_contains") or None,
             players_needed=_to_int(data.get("players_needed")),
@@ -127,20 +130,36 @@ def _build_sql(f: FilterCriteria) -> tuple:
         # Only fall back to raw-text matching when the ISO field is NULL,
         # to avoid false positives like "18h-20h 19h30-21h30" matching hour=19.
         hour_24 = f.hour
-        conditions.append(
-            "("
-            "CAST(strftime('%H', play_datetime_iso) AS INTEGER) = ? OR "
-            "(play_datetime_iso IS NULL AND ("
-            "play_datetime_raw LIKE ? OR "
-            "play_datetime_raw LIKE ?"
-            "))"
-            ")"
-        )
-        params.extend([
-            hour_24,
-            f"%{hour_24}h%",
-            f"%{hour_24} giờ%",
-        ])
+        if f.minute is not None:
+            # Exact hour+minute via strftime; raw fallback matches "19h30" / "19:30"
+            raw_time_str = f"{hour_24}h{f.minute:02d}"
+            raw_time_colon = f"{hour_24}:{f.minute:02d}"
+            conditions.append(
+                "("
+                "(CAST(strftime('%H', play_datetime_iso) AS INTEGER) = ? "
+                " AND CAST(strftime('%M', play_datetime_iso) AS INTEGER) = ?) OR "
+                "(play_datetime_iso IS NULL AND ("
+                "play_datetime_raw LIKE ? OR "
+                "play_datetime_raw LIKE ?"
+                "))"
+                ")"
+            )
+            params.extend([hour_24, f.minute, f"%{raw_time_str}%", f"%{raw_time_colon}%"])
+        else:
+            conditions.append(
+                "("
+                "CAST(strftime('%H', play_datetime_iso) AS INTEGER) = ? OR "
+                "(play_datetime_iso IS NULL AND ("
+                "play_datetime_raw LIKE ? OR "
+                "play_datetime_raw LIKE ?"
+                "))"
+                ")"
+            )
+            params.extend([
+                hour_24,
+                f"%{hour_24}h%",
+                f"%{hour_24} giờ%",
+            ])
     elif f.time_contains:
         conditions.append(
             "(play_datetime_raw LIKE ? OR play_datetime_iso LIKE ?)"

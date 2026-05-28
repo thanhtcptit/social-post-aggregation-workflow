@@ -5,7 +5,7 @@ An agentic CLI tool that scrapes Vietnamese Facebook badminton groups, uses an L
 ## Features
 
 - **Scrapes public Facebook groups** using Playwright (Chromium) with a persistent login session
-- **Parses Vietnamese posts** with GPT-4o-mini to extract: play time, location, level, player count, shuttlecock type, and more
+- **Parses Vietnamese posts** with GPT-4o-mini to extract: play time, location, level, player count, gender breakdown, and more
 - **Caches posts locally** in SQLite — re-queries are instant and don't re-scrape
 - **Natural language search** — ask "trình độ TBY lúc 7 giờ tối" and get a filtered, formatted table
 - **Swappable LLM backends** — switch between OpenAI, Anthropic, and Gemini via a single env var
@@ -56,39 +56,109 @@ All commands are run via `uv run python main.py`.
 
 ### First run — log in to Facebook
 
-On the first run the browser profile is empty, so launch with `--headed` to log in manually (handles 2FA, CAPTCHA, etc.). The session is saved to `data/browser_profiles/` and reused automatically on all future runs.
+On the first run the browser profile is empty, so launch with `--headed` (the default) to log in manually (handles 2FA, CAPTCHA, etc.). The session is saved to `data/browser_profiles/` and reused automatically on all future runs.
 
 ```bash
-uv run python main.py fetch --group-url "https://www.facebook.com/groups/<group-id>" --headed
+uv run python main.py fetch --group-url "https://www.facebook.com/groups/<group-id>"
 ```
 
-### Fetch posts
+> **Note:** `--headed` is the default. Use `--headless` only if you are sure your session is still active, since Facebook may return 0 posts for headless requests.
+
+---
+
+### `fetch` — Scrape and cache posts
 
 ```bash
 # Fetch the last 12 hours of posts (up to 100) from a specific group (default)
 uv run python main.py fetch --group-url "https://www.facebook.com/groups/<group-id>"
 
-# Fetch the 50 most recent posts with no time constraint
+# Fetch the 50 most recent badminton posts with no time constraint
 uv run python main.py fetch --group-url "https://www.facebook.com/groups/<group-id>" --latest 50
 
-# Fetch only the last 6 hours, limit to 50 posts
+# Fetch only the last 6 hours, limit to 50 raw posts
 uv run python main.py fetch --group-url "https://www.facebook.com/groups/<group-id>" --hours 6 --max-posts 50
 
 # Fetch all saved groups at once (no --group-url needed after first add)
 uv run python main.py fetch
+
+# Run browser in headless mode (only if your session is still valid)
+uv run python main.py fetch --group-url "https://www.facebook.com/groups/<group-id>" --headless
 ```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--group-url` / `-g` | — | Facebook group URL. Omit to fetch all saved groups. |
+| `--latest` / `-l` | — | Fetch the N most recent badminton posts; overrides `--hours` and `--max-posts`. |
+| `--hours` / `-H` | `12` | How many hours back to look for posts. |
+| `--max-posts` / `-n` | `100` | Maximum raw posts to fetch per group. |
+| `--headed` / `--headless` | `--headed` | Show or hide the browser window. |
 
 Output example:
 ```
 Group: 123456789
-  latest=30  already_cached=47
-  Fetched 30 posts (12 new)
+  latest=30 badminton posts  already_seen=47
+  Saved 12 new post(s) to cache
   ✓ Saved 12 posts (9 badminton-related).
 
-Done. 12 new post(s) fetched and cached in data/cache.db.
+Done. 12 new post(s) fetched and cached in data/cache.db. (took 45s)
 ```
 
-### Query the cache
+---
+
+### `posts` — View cached posts
+
+Browse posts that have already been fetched and stored locally.
+
+```bash
+# Show the 50 most recent badminton posts (default)
+uv run python main.py posts
+
+# Show up to 100 posts
+uv run python main.py posts --limit 100
+
+# Filter by group ID
+uv run python main.py posts --group 906525958436246
+
+# Include non-badminton posts
+uv run python main.py posts --all
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--limit` / `-l` | `50` | Maximum number of posts to display. |
+| `--group` / `-g` | — | Filter by group ID or slug. |
+| `--all` | `false` | Include non-badminton posts (by default only badminton posts are shown). |
+
+---
+
+### `seen` — Manage the scrape cache
+
+The scrape cache tracks which post IDs have already been processed so they are not re-fetched. Use this command to inspect or reset it.
+
+```bash
+# List the 100 most recently seen post IDs
+uv run python main.py seen
+
+# List seen posts for a specific group
+uv run python main.py seen --group 906525958436246
+
+# Remove a single post from the scrape cache (it will be fetched again on the next run)
+uv run python main.py seen --remove <post-id>
+
+# Clear the entire scrape cache (all posts will be re-fetched on the next run)
+uv run python main.py seen --clear
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--limit` / `-l` | `100` | Maximum number of entries to display. |
+| `--group` / `-g` | — | Filter by group ID or slug. |
+| `--remove` / `-r` | — | Remove a single post ID from the scrape cache. |
+| `--clear` | `false` | Clear **all** entries from the scrape cache. |
+
+---
+
+### `query` — Natural language search
 
 ```bash
 uv run python main.py query "trình độ TBY lúc 7 giờ tối"
@@ -97,32 +167,58 @@ uv run python main.py query "cần 2 người TB+"
 uv run python main.py query "trình độ TB 19h" --limit 10
 ```
 
+| Flag | Default | Description |
+|---|---|---|
+| `--limit` / `-l` | `20` | Maximum number of results to display. |
+
 Results are displayed as a formatted table:
 
 ```
                  Results for: "trình độ TBY lúc 7 giờ tối"
-┌──────────────────┬────────┬──────────────────┬──────┬─────────┬───────────────────────────────────────┐
-│ Time             │ Level  │ Location         │ Need │ Shuttle │ URL                                   │
-├──────────────────┼────────┼──────────────────┼──────┼─────────┼───────────────────────────────────────┤
-│ tối nay 7h       │ TBY    │ Sân Phú Nhuận    │ 2    │ 95%     │ https://facebook.com/groups/.../posts/…│
-│ Thứ 4 19:00      │ TBY    │ Quận 3           │ 1    │ new     │ https://facebook.com/groups/.../posts/…│
-└──────────────────┴────────┴──────────────────┴──────┴─────────┴───────────────────────────────────────┘
+┌───┬──────────────────┬────────┬──────────────────┬──────┬────────────┬────────┐
+│ # │ Play Time        │ Level  │ Location         │ Need │ Fetched    │ Link   │
+├───┼──────────────────┼────────┼──────────────────┼──────┼────────────┼────────┤
+│ 1 │ tối nay 7h       │ TBY    │ Sân Phú Nhuận    │ 2    │ 2026-05-27 │ ↗ open │
+│ 2 │ Thứ 4 19:00      │ TBY    │ Quận 3           │ 1    │ 2026-05-27 │ ↗ open │
+└───┴──────────────────┴────────┴──────────────────┴──────┴────────────┴────────┘
 2 result(s).
 ```
 
-### Manage groups
+---
+
+### `clear-posts` — Delete all cached posts
+
+Wipes all posts from the local database. The scrape cache (seen IDs) is **not** affected — use `seen --clear` if you also want to re-scrape everything.
 
 ```bash
-# Save a group so it's fetched automatically
+# With confirmation prompt
+uv run python main.py clear-posts
+
+# Skip confirmation
+uv run python main.py clear-posts --yes
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--yes` / `-y` | `false` | Skip the confirmation prompt. |
+
+---
+
+### `groups` — Manage monitored groups
+
+```bash
+# Save a group so it's fetched automatically with `fetch` (no --group-url needed)
 uv run python main.py groups add "https://www.facebook.com/groups/<group-id>" --name "Cầu lông HN"
 
 # List saved groups
 uv run python main.py groups list
 ```
 
-### Keyword filters
+---
 
-Posts whose text contains any excluded keyword are silently skipped — they are **not** sent to the LLM for parsing and **not** stored in the database.
+### `keywords` — Keyword exclusion filters
+
+Posts whose text contains any excluded keyword are silently skipped — they are **not** sent to the LLM for parsing, **not** stored in the database, and any existing posts matching the keyword are purged immediately on `keywords add`.
 
 ```bash
 # Add keywords to exclude (e.g. ads, recruitment, off-topic posts)
@@ -203,12 +299,12 @@ Each post is parsed by the LLM into the following structured fields stored in SQ
 | Field | Description | Example values |
 |---|---|---|
 | `is_badminton_post` | Whether this is a player-search post | `true` / `false` |
-| `players_needed` | Number of players being sought | `1`, `2`, `3` |
-| `play_datetime_raw` | Play time as written in the post | `"tối nay 7h"`, `"CN 19:00"` |
-| `play_datetime_iso` | Normalized ISO 8601 (if determinable) | `"2026-05-21T19:00"` |
-| `location` | Court / district / address | `"Sân Phú Nhuận"`, `"Quận 1"` |
+| `players_needed` | Number of additional players being recruited | `1`, `2`, `3` |
+| `players_gender` | Gender breakdown of players needed (as written) | `"1 nữ"`, `"2 nam"`, `"1 nam 1 nữ"` |
+| `play_datetime_raw` | Play time exactly as written in the post | `"tối nay 7h"`, `"CN 19:00"` |
+| `play_datetime_iso` | ISO 8601 datetime if a single specific date/time can be determined | `"2026-05-21T19:00"` |
+| `location` | Full venue name and address | `"Sân Phú Nhuận"`, `"Quận 1"` |
 | `level` | Skill level required | `"Y"`, `"TBY"`, `"TB"`, `"TB+"`, `"K"` |
-| `shuttlecock` | Shuttlecock type | `"95%"` (used), `"new"` (brand new) |
 | `notes` | Any other relevant info from the post | — |
 
 ## Caveats

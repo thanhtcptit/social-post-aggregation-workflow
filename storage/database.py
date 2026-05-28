@@ -299,6 +299,25 @@ def add_keyword(db_path: str, keyword: str) -> None:
         )
 
 
+def purge_posts_by_keyword(db_path: str, keyword: str) -> int:
+    """Delete all posts whose raw_text contains *keyword* (case-insensitive Unicode match).
+    SQLite's built-in lower() only covers ASCII, so we fetch IDs in Python and delete by ID.
+    Returns the number of deleted rows.
+    """
+    kw_lower = keyword.strip().lower()
+    with _connect(db_path) as conn:
+        rows = conn.execute("SELECT id, raw_text FROM posts").fetchall()
+        ids_to_delete = [
+            row["id"] for row in rows if kw_lower in row["raw_text"].lower()
+        ]
+        if ids_to_delete:
+            conn.execute(
+                f"DELETE FROM posts WHERE id IN ({','.join(['?'] * len(ids_to_delete))})",
+                ids_to_delete,
+            )
+    return len(ids_to_delete)
+
+
 def remove_keyword(db_path: str, keyword: str) -> bool:
     with _connect(db_path) as conn:
         result = conn.execute(

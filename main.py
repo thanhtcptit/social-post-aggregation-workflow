@@ -447,7 +447,7 @@ def query(
         help="Natural language query, e.g. 'trình độ TBY lúc 7 giờ tối quận 1'.",
     ),
     limit: int = typer.Option(
-        20, "--limit", "-l", help="Maximum number of results to display."
+        50, "--limit", "-l", help="Maximum number of results to display."
     ),
 ) -> None:
     """Search the local cache with a natural language query."""
@@ -568,11 +568,14 @@ def keywords_add(
 ) -> None:
     """Add a keyword filter — posts containing it will be skipped during fetch."""
     from config import settings
-    from storage.database import init_db, add_keyword
+    from storage.database import init_db, add_keyword, purge_posts_by_keyword
 
     init_db(settings.db_path)
     add_keyword(settings.db_path, keyword)
+    purged = purge_posts_by_keyword(settings.db_path, keyword)
     rprint(f"[green]Keyword added:[/green] \"{keyword}\"")
+    if purged:
+        rprint(f"[dim]Purged {purged} existing post(s) from the database matching this keyword.[/dim]")
 
 
 @keywords_app.command("remove")
